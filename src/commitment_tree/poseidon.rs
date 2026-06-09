@@ -45,6 +45,19 @@ pub fn merkle_compress(level: u8, left: Fr, right: Fr) -> Fr {
     ])
 }
 
+/// `Poseidon(domain, a, b)` over `ConstantLength<3>` — the width-3 two-input hash with
+/// a `u64` domain tag. Byte-identical to the prover's `poseidon_merkle_bn254::poseidon2`
+/// and to `merkle_compress` when `domain == level`. Used for the frozen Indexed MT,
+/// whose node domains exceed the `u8` range of `merkle_compress`.
+#[inline]
+pub fn poseidon_domain_pair(domain: u64, a: Fr, b: Fr) -> Fr {
+    Hash::<Fr, Bn254PoseidonMerkleSpec, ConstantLength<3>, 3, 2>::init().hash([
+        Fr::from(domain),
+        a,
+        b,
+    ])
+}
+
 /// Full Merkle root (depth [`MERKLE_DEPTH_EVM`]) over `Fr` leaves from a sibling path.
 pub fn merkle_root(position: u32, leaf: Fr, siblings: &[Fr; MERKLE_DEPTH_EVM]) -> Fr {
     let mut node = leaf;
