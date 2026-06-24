@@ -48,6 +48,67 @@ pub fn shield_completed_topic0_hex() -> String {
     )
 }
 
+/// keccak256("Perc20Created(address,address,string,string,uint8)") — issuer-minted pool genesis.
+pub fn perc20_created_topic0_hex() -> String {
+    format!(
+        "0x{}",
+        hex::encode(Keccak256::digest(b"Perc20Created(address,address,string,string,uint8)"))
+    )
+}
+
+/// keccak256("Shielded(address,uint256,uint256)") — WrappedPERC20 deposit accounting event.
+pub fn shielded_topic0_hex() -> String {
+    format!("0x{}", hex::encode(Keccak256::digest(b"Shielded(address,uint256,uint256)")))
+}
+
+/// keccak256("Unshielded(address,uint256,uint256)") — WrappedPERC20 withdrawal accounting event.
+pub fn unshielded_topic0_hex() -> String {
+    format!("0x{}", hex::encode(Keccak256::digest(b"Unshielded(address,uint256,uint256)")))
+}
+
+/// keccak256("WrappedCreated(address,address,uint256,string,string,uint8)") — pool init metadata.
+pub fn wrapped_created_topic0_hex() -> String {
+    format!(
+        "0x{}",
+        hex::encode(Keccak256::digest(
+            b"WrappedCreated(address,address,uint256,string,string,uint8)"
+        ))
+    )
+}
+
+/// keccak256("WrappedDeployed(address,address,address,uint256)") — factory deployment event.
+pub fn wrapped_deployed_topic0_hex() -> String {
+    format!(
+        "0x{}",
+        hex::encode(Keccak256::digest(b"WrappedDeployed(address,address,address,uint256)"))
+    )
+}
+
+/// Decoded `Shielded` / `Unshielded` accounting event (the underlying-custody side of a
+/// WrappedPERC20 shield/unshield). The note cmx itself arrives via `NoteAdded`; this event
+/// carries the public deposit/withdraw amounts and the EVM actor.
+#[derive(Debug, Clone)]
+pub struct DecodedShielded {
+    /// `depositor` (Shielded) or `recipient` (Unshielded), low-20-bytes EVM address.
+    pub actor: [u8; 20],
+    /// Amount in note units.
+    pub amount_units: u128,
+    /// Amount in the underlying token's smallest unit (`amount_units * scale`).
+    pub wei_amount: u128,
+}
+
+/// Decoded `WrappedCreated` pool-init metadata (used for discovery/verification + the
+/// pool-metadata API). `pool`/`underlying` come from indexed topics.
+#[derive(Debug, Clone)]
+pub struct DecodedWrappedCreated {
+    pub pool: [u8; 20],
+    pub underlying: [u8; 20],
+    pub scale: u128,
+    pub name: String,
+    pub symbol: String,
+    pub decimals: u8,
+}
+
 #[derive(Debug, Clone)]
 pub struct DecodedNoteAdded {
     pub cmx: [u8; 32],
@@ -68,8 +129,18 @@ pub enum LogDecodeError {
     BadNoteConfirmed,
     #[error("invalid topics/data for ShieldCompleted")]
     BadShieldCompleted,
+    #[error("invalid topics/data for Shielded/Unshielded")]
+    BadShielded,
+    #[error("invalid topics/data for WrappedCreated")]
+    BadWrappedCreated,
     #[error("ethabi decode: {0}")]
     EthAbi(String),
+}
+
+/// Extract a low-20-byte EVM address from a 32-byte indexed topic.
+fn topic_to_address(topic: &str) -> Option<[u8; 20]> {
+    let b = topic_to_bytes32(topic)?;
+    Some(b[12..32].try_into().ok()?)
 }
 
 fn topic_to_bytes32(topic: &str) -> Option<[u8; 32]> {
@@ -229,6 +300,85 @@ pub fn decode_shield_completed_log(topics: &[String], data_hex: &str) -> Result<
     Ok((cmx, amt))
 }
 
+fn decode_shielded_like(
+    topics: &[String],
+    data_hex: &str,
+) -> Result<DecodedShielded, LogDecodeError> {
+    let actor = topics
+        .get(1)
+        .and_then(|t| topic_to_address(t))
+        .ok_or(LogDecodeError::BadShielded)?;
+    let raw = hex::decode(data_hex.strip_prefix("0x").unwrap_or(data_hex))
+        .map_err(|_| LogDecodeError::BadShielded)?;
+    // data: abi.encode(uint256 amountUnits, uint256 weiAmount)
+    let tokens = decode(&[ParamType::Uint(256), ParamType::Uint(256)], &raw)
+        .map_err(|e| LogDecodeError::EthAbi(e.to_string()))?;
+    let amount_units = match tokens.first() {
+        Some(Token::Uint(u)) => u128::try_from(*u).map_err(|_| LogDecodeError::BadShielded)?,
+        _ => return Err(LogDecodeError::BadShielded),
+    };
+    let wei_amount = match tokens.get(1) {
+        Some(Token::Uint(u)) => u128::try_from(*u).map_err(|_| LogDecodeError::BadShielded)?,
+        _ => return Err(LogDecodeError::BadShielded),
+    };
+    Ok(DecodedShielded { actor, amount_units, wei_amount })
+}
+
+/// Decode a `Shielded(address indexed depositor, uint256 amountUnits, uint256 weiAmount)` log.
+pub fn decode_shielded_log(topics: &[String], data_hex: &str) -> Result<DecodedShielded, LogDecodeError> {
+    decode_shielded_like(topics, data_hex)
+}
+
+/// Decode an `Unshielded(address indexed recipient, uint256 amountUnits, uint256 weiAmount)` log.
+pub fn decode_unshielded_log(topics: &[String], data_hex: &str) -> Result<DecodedShielded, LogDecodeError> {
+    decode_shielded_like(topics, data_hex)
+}
+
+/// Decode a `WrappedCreated(address indexed pool, address indexed underlying, uint256 scale,
+/// string name, string symbol, uint8 decimals)` log.
+pub fn decode_wrapped_created_log(
+    topics: &[String],
+    data_hex: &str,
+) -> Result<DecodedWrappedCreated, LogDecodeError> {
+    let pool = topics
+        .get(1)
+        .and_then(|t| topic_to_address(t))
+        .ok_or(LogDecodeError::BadWrappedCreated)?;
+    let underlying = topics
+        .get(2)
+        .and_then(|t| topic_to_address(t))
+        .ok_or(LogDecodeError::BadWrappedCreated)?;
+    let raw = hex::decode(data_hex.strip_prefix("0x").unwrap_or(data_hex))
+        .map_err(|_| LogDecodeError::BadWrappedCreated)?;
+    let tokens = decode(
+        &[
+            ParamType::Uint(256),
+            ParamType::String,
+            ParamType::String,
+            ParamType::Uint(8),
+        ],
+        &raw,
+    )
+    .map_err(|e| LogDecodeError::EthAbi(e.to_string()))?;
+    let scale = match tokens.first() {
+        Some(Token::Uint(u)) => u128::try_from(*u).map_err(|_| LogDecodeError::BadWrappedCreated)?,
+        _ => return Err(LogDecodeError::BadWrappedCreated),
+    };
+    let name = match &tokens[1] {
+        Token::String(s) => s.clone(),
+        _ => return Err(LogDecodeError::BadWrappedCreated),
+    };
+    let symbol = match &tokens[2] {
+        Token::String(s) => s.clone(),
+        _ => return Err(LogDecodeError::BadWrappedCreated),
+    };
+    let decimals = match tokens.get(3) {
+        Some(Token::Uint(u)) => u8::try_from(*u).map_err(|_| LogDecodeError::BadWrappedCreated)?,
+        _ => return Err(LogDecodeError::BadWrappedCreated),
+    };
+    Ok(DecodedWrappedCreated { pool, underlying, scale, name, symbol, decimals })
+}
+
 #[cfg(test)]
 mod tests {
     use ethabi::{encode, Token};
@@ -299,6 +449,65 @@ mod tests {
         assert_eq!(decoded.enc_ciphertext, enc);
         assert!(decoded.out_ciphertext.is_empty());
         assert_eq!(decoded.cv_net_x, None);
+    }
+
+    #[test]
+    fn new_topic0s_are_distinct_and_well_formed() {
+        for t in [
+            shielded_topic0_hex(),
+            unshielded_topic0_hex(),
+            wrapped_created_topic0_hex(),
+            wrapped_deployed_topic0_hex(),
+            perc20_created_topic0_hex(),
+        ] {
+            assert_eq!(t.len(), 2 + 64);
+        }
+        assert_ne!(shielded_topic0_hex(), unshielded_topic0_hex());
+        assert_ne!(wrapped_created_topic0_hex(), wrapped_deployed_topic0_hex());
+    }
+
+    #[test]
+    fn shielded_roundtrip() {
+        let actor = [0xABu8; 20];
+        let mut actor_topic = [0u8; 32];
+        actor_topic[12..].copy_from_slice(&actor);
+        let data = encode(&[
+            Token::Uint(1_000u64.into()),
+            Token::Uint(1_000_000_000_000u64.into()),
+        ]);
+        let topics = vec![shielded_topic0_hex(), format!("0x{}", hex::encode(actor_topic))];
+        let d = decode_shielded_log(&topics, &format!("0x{}", hex::encode(&data))).unwrap();
+        assert_eq!(d.actor, actor);
+        assert_eq!(d.amount_units, 1_000);
+        assert_eq!(d.wei_amount, 1_000_000_000_000);
+    }
+
+    #[test]
+    fn wrapped_created_roundtrip() {
+        let pool = [0x11u8; 20];
+        let underlying = [0x22u8; 20];
+        let mut pool_t = [0u8; 32];
+        pool_t[12..].copy_from_slice(&pool);
+        let mut und_t = [0u8; 32];
+        und_t[12..].copy_from_slice(&underlying);
+        let data = encode(&[
+            Token::Uint(1_000_000u64.into()),
+            Token::String("Wrapped USDC".to_string()),
+            Token::String("wUSDC".to_string()),
+            Token::Uint(6u8.into()),
+        ]);
+        let topics = vec![
+            wrapped_created_topic0_hex(),
+            format!("0x{}", hex::encode(pool_t)),
+            format!("0x{}", hex::encode(und_t)),
+        ];
+        let d = decode_wrapped_created_log(&topics, &format!("0x{}", hex::encode(&data))).unwrap();
+        assert_eq!(d.pool, pool);
+        assert_eq!(d.underlying, underlying);
+        assert_eq!(d.scale, 1_000_000);
+        assert_eq!(d.name, "Wrapped USDC");
+        assert_eq!(d.symbol, "wUSDC");
+        assert_eq!(d.decimals, 6);
     }
 
     #[test]

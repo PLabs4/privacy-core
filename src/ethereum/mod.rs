@@ -17,14 +17,25 @@ pub use groth16_proof::{
 
 mod bundle_decode;
 mod events;
+mod perc20;
 pub use bundle_decode::{
     bundle_actions_by_cmx, decode_bundle_calldata, BundleActionCiphertexts, BundleDecodeError,
 };
 pub use events::{
     decode_note_added_log, decode_note_confirmed_log, decode_shield_completed_log,
+    decode_shielded_log, decode_unshielded_log, decode_wrapped_created_log,
     note_added_legacy_topic0_hex, note_added_topic0_alternatives, note_added_topic0_hex,
-    note_confirmed_topic0_hex, shield_completed_topic0_hex,
-    DecodedNoteAdded, LogDecodeError,
+    note_confirmed_topic0_hex, perc20_created_topic0_hex, shield_completed_topic0_hex,
+    shielded_topic0_hex, unshielded_topic0_hex, wrapped_created_topic0_hex,
+    wrapped_deployed_topic0_hex, DecodedNoteAdded, DecodedShielded, DecodedWrappedCreated,
+    LogDecodeError,
+};
+pub use perc20::{
+    compute_swap_id, encode_perc20_transfer_calldata, encode_perc20_transfer_executor_calldata,
+    encode_swap_initiate_calldata, encode_swap_join_calldata, encode_swap_settle_calldata,
+    encode_wrapped_shield_calldata, encode_wrapped_unshield_calldata, perc20_transfer_executor_selector,
+    perc20_transfer_selector, privacy_call_commit, swap_initiate_selector, swap_join_selector,
+    swap_settle_selector, wrapped_shield_selector, wrapped_unshield_selector, PrivacyCallArgs,
 };
 
 use ethabi::{encode, Token, Uint};

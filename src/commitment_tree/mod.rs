@@ -6,6 +6,7 @@
 //! the `siblings` (LE hex) directly.
 
 mod poseidon_primitives;
+pub mod frozen;
 pub mod poseidon;
 
 use ff::PrimeField;
