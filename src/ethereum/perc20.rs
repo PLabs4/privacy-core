@@ -138,15 +138,20 @@ pub fn encode_wrapped_unshield_calldata(
 
 // ── SwapCoordinator (3-tx atomic swap) ───────────────────────────────────────
 
-/// `keccak256(abi.encode(initiator, poolA, poolB, htlcHash, commitA, salt))` — the swap id
-/// the `SwapCoordinator` derives in `initiateSwap`. The relayer recomputes it locally so it
-/// can issue `joinSwap`/`settle` without waiting to parse the receipt.
+/// `keccak256(abi.encode(initiator, poolA, poolB, htlcHash, commitA, rkBx, rkBy, salt))` — the
+/// swap id the `SwapCoordinator` derives in `initiateSwap`. The relayer recomputes it locally so
+/// it can issue `joinSwap`/`settle` without waiting to parse the receipt.
+///
+/// `rk_bx`/`rk_by` are the joiner's randomised spend-auth key coords (BE), pre-committed by the
+/// initiator at `initiateSwap` (audit A-1): they are part of the swap id and the join challenge.
 pub fn compute_swap_id(
     initiator: &[u8; 20],
     pool_a: &[u8; 20],
     pool_b: &[u8; 20],
     htlc_hash: &[u8; 32],
     commit_a: &[u8; 32],
+    rk_bx: &[u8; 32],
+    rk_by: &[u8; 32],
     salt: &[u8; 32],
 ) -> [u8; 32] {
     let encoded = encode(&[
@@ -155,17 +160,23 @@ pub fn compute_swap_id(
         Token::Address(ethabi::Address::from(*pool_b)),
         Token::FixedBytes(htlc_hash.to_vec()),
         Token::FixedBytes(commit_a.to_vec()),
+        Token::Uint(Uint::from_big_endian(rk_bx)),
+        Token::Uint(Uint::from_big_endian(rk_by)),
         Token::FixedBytes(salt.to_vec()),
     ]);
     Keccak256::digest(&encoded).into()
 }
 
-/// `initiateSwap(address,address,bytes32,bytes32,uint64,bytes32)` — selector `0x1e179f2a`.
+/// `initiateSwap(address,address,bytes32,bytes32,uint256,uint256,uint64,bytes32)` — selector
+/// `0x6db7974d`. `rk_bx`/`rk_by` are the joiner's randomised spend-auth key coords (BE),
+/// pre-committed by the initiator (audit A-1) so only the real counterparty can `joinSwap`.
 pub fn encode_swap_initiate_calldata(
     pool_a: &[u8; 20],
     pool_b: &[u8; 20],
     htlc_hash: &[u8; 32],
     commit_a: &[u8; 32],
+    rk_bx: &[u8; 32],
+    rk_by: &[u8; 32],
     deadline: u64,
     salt: &[u8; 32],
 ) -> Vec<u8> {
@@ -174,24 +185,25 @@ pub fn encode_swap_initiate_calldata(
         Token::Address(ethabi::Address::from(*pool_b)),
         Token::FixedBytes(htlc_hash.to_vec()),
         Token::FixedBytes(commit_a.to_vec()),
+        Token::Uint(Uint::from_big_endian(rk_bx)),
+        Token::Uint(Uint::from_big_endian(rk_by)),
         Token::Uint(Uint::from(deadline)),
         Token::FixedBytes(salt.to_vec()),
     ];
     let body = encode(&tokens);
     with_selector(
-        selector(b"initiateSwap(address,address,bytes32,bytes32,uint64,bytes32)"),
+        selector(b"initiateSwap(address,address,bytes32,bytes32,uint256,uint256,uint64,bytes32)"),
         body,
     )
 }
 
-/// `joinSwap(bytes32,bytes32,uint256,uint256,uint256[3])` — selector `0x256e1950`.
-/// `rk_bx`/`rk_by` are the joiner's randomised spend-auth key coords (BE); `joiner_sig`
-/// is its Baby JubJub Schnorr signature over the join challenge.
+/// `joinSwap(bytes32,bytes32,uint256[3])` — selector `0x8bbe821a`.
+/// `rkB` is NOT supplied here — it was committed by the initiator at `initiateSwap` and is read
+/// from storage. `joiner_sig` is the Baby JubJub Schnorr signature under `rkB` over the join
+/// challenge, proving control of the pre-committed key.
 pub fn encode_swap_join_calldata(
     swap_id: &[u8; 32],
     commit_b: &[u8; 32],
-    rk_bx: &[u8; 32],
-    rk_by: &[u8; 32],
     joiner_sig: &[[u8; 32]; 3],
 ) -> Vec<u8> {
     let joiner_sig_token = Token::FixedArray(
@@ -203,13 +215,11 @@ pub fn encode_swap_join_calldata(
     let tokens = vec![
         Token::FixedBytes(swap_id.to_vec()),
         Token::FixedBytes(commit_b.to_vec()),
-        Token::Uint(Uint::from_big_endian(rk_bx)),
-        Token::Uint(Uint::from_big_endian(rk_by)),
         joiner_sig_token,
     ];
     let body = encode(&tokens);
     with_selector(
-        selector(b"joinSwap(bytes32,bytes32,uint256,uint256,uint256[3])"),
+        selector(b"joinSwap(bytes32,bytes32,uint256[3])"),
         body,
     )
 }
@@ -241,8 +251,8 @@ pub fn perc20_transfer_selector() -> [u8; 4] { selector(b"transfer((bytes,uint25
 pub fn perc20_transfer_executor_selector() -> [u8; 4] { selector(b"transfer(address,(bytes,uint256[3]))") }
 pub fn wrapped_shield_selector() -> [u8; 4] { selector(b"shield(uint256,(bytes,uint256[3]))") }
 pub fn wrapped_unshield_selector() -> [u8; 4] { selector(b"unshield(uint256,address,(bytes,uint256[3]))") }
-pub fn swap_initiate_selector() -> [u8; 4] { selector(b"initiateSwap(address,address,bytes32,bytes32,uint64,bytes32)") }
-pub fn swap_join_selector() -> [u8; 4] { selector(b"joinSwap(bytes32,bytes32,uint256,uint256,uint256[3])") }
+pub fn swap_initiate_selector() -> [u8; 4] { selector(b"initiateSwap(address,address,bytes32,bytes32,uint256,uint256,uint64,bytes32)") }
+pub fn swap_join_selector() -> [u8; 4] { selector(b"joinSwap(bytes32,bytes32,uint256[3])") }
 pub fn swap_settle_selector() -> [u8; 4] { selector(b"settle(bytes32,bytes32,(bytes,uint256[3]),(bytes,uint256[3]))") }
 
 // Keep `EthEncodeError` reachable for symmetry with the other encoders (none of these
@@ -278,8 +288,8 @@ mod tests {
         assert_eq!(perc20_transfer_executor_selector(), [0xc7, 0xb9, 0x21, 0xd3]);
         assert_eq!(wrapped_shield_selector(), [0x04, 0x11, 0xcb, 0xab]);
         assert_eq!(wrapped_unshield_selector(), [0x53, 0x64, 0x4c, 0x61]);
-        assert_eq!(swap_initiate_selector(), [0x1e, 0x17, 0x9f, 0x2a]);
-        assert_eq!(swap_join_selector(), [0x25, 0x6e, 0x19, 0x50]);
+        assert_eq!(swap_initiate_selector(), [0x6d, 0xb7, 0x97, 0x4d]);
+        assert_eq!(swap_join_selector(), [0x8b, 0xbe, 0x82, 0x1a]);
         assert_eq!(swap_settle_selector(), [0xc7, 0xec, 0xe1, 0x5f]);
     }
 
@@ -326,15 +336,20 @@ mod tests {
 
     #[test]
     fn swap_id_matches_abi_encode_layout() {
-        // Deterministic + sensitive to each field.
-        let base = compute_swap_id(&[1u8; 20], &[2u8; 20], &[3u8; 20], &[4u8; 32], &[5u8; 32], &[6u8; 32]);
+        // Deterministic + sensitive to each field (incl. the pre-committed joiner key rkB).
+        let base = compute_swap_id(&[1u8; 20], &[2u8; 20], &[3u8; 20], &[4u8; 32], &[5u8; 32], &[8u8; 32], &[9u8; 32], &[6u8; 32]);
         assert_eq!(
             base,
-            compute_swap_id(&[1u8; 20], &[2u8; 20], &[3u8; 20], &[4u8; 32], &[5u8; 32], &[6u8; 32])
+            compute_swap_id(&[1u8; 20], &[2u8; 20], &[3u8; 20], &[4u8; 32], &[5u8; 32], &[8u8; 32], &[9u8; 32], &[6u8; 32])
         );
         assert_ne!(
             base,
-            compute_swap_id(&[1u8; 20], &[2u8; 20], &[3u8; 20], &[4u8; 32], &[5u8; 32], &[7u8; 32])
+            compute_swap_id(&[1u8; 20], &[2u8; 20], &[3u8; 20], &[4u8; 32], &[5u8; 32], &[8u8; 32], &[9u8; 32], &[7u8; 32])
+        );
+        // Changing rkB alone must change the id.
+        assert_ne!(
+            base,
+            compute_swap_id(&[1u8; 20], &[2u8; 20], &[3u8; 20], &[4u8; 32], &[5u8; 32], &[0xAu8; 32], &[9u8; 32], &[6u8; 32])
         );
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "privacy-core"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Shared, halo2-free foundation for privacy-indexer and privacy-relayer (event decode, calldata encode, plain data types, shield intents)."
