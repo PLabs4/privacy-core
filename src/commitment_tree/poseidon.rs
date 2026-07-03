@@ -9,6 +9,8 @@
 use super::poseidon_primitives::{generate_constants, ConstantLength, Hash, Mds, Spec};
 use ff::Field;
 use halo2curves::bn256::Fr;
+use std::collections::HashMap;
+use std::sync::{OnceLock, RwLock};
 
 /// Orchard-compatible depth for the incremental note commitment tree.
 pub const MERKLE_DEPTH_EVM: usize = 32;
@@ -31,7 +33,13 @@ impl Spec<Fr, 3, 2> for Bn254PoseidonMerkleSpec {
         0
     }
     fn constants() -> (Vec<[Fr; 3]>, Mds<Fr, 3>, Mds<Fr, 3>) {
-        generate_constants::<Fr, Self, 3, 2>()
+        // Grain-based constant generation is ~10x the cost of the hash itself and the
+        // output is fixed for this spec, so generate once and clone (a 64-entry Vec plus
+        // two 3x3 matrices — negligible next to one round of field exponentiation).
+        static CONSTANTS: OnceLock<(Vec<[Fr; 3]>, Mds<Fr, 3>, Mds<Fr, 3>)> = OnceLock::new();
+        CONSTANTS
+            .get_or_init(generate_constants::<Fr, Self, 3, 2>)
+            .clone()
     }
 }
 
@@ -79,6 +87,12 @@ pub struct Bn254IncrementalMerkleTree {
     leaves: Vec<Fr>,
     /// `empty[l]` is the root of a depth-`l` all-zero subtree (`empty[0]` = `Fr::ZERO`).
     empty: [Fr; MERKLE_DEPTH_EVM + 1],
+    /// Memoized hashes of *complete* subtrees, keyed by `(level, idx)`. The tree is
+    /// append-only, so a complete subtree's hash never changes and the cache never needs
+    /// invalidation. Without this, every `root()`/`witness()` call rehashes the whole
+    /// tree — O(leaves) Poseidon compressions per query, which made indexer Merkle-path
+    /// queries degrade linearly as notes accumulated.
+    node_cache: RwLock<HashMap<(usize, usize), Fr>>,
 }
 
 impl Bn254IncrementalMerkleTree {
@@ -87,7 +101,7 @@ impl Bn254IncrementalMerkleTree {
         for i in 1..=MERKLE_DEPTH_EVM {
             empty[i] = merkle_compress((i - 1) as u8, empty[i - 1], empty[i - 1]);
         }
-        Self { leaves: Vec::new(), empty }
+        Self { leaves: Vec::new(), empty, node_cache: RwLock::new(HashMap::new()) }
     }
 
     pub fn append(&mut self, leaf: Fr) {
@@ -125,9 +139,21 @@ impl Bn254IncrementalMerkleTree {
         if level == 0 {
             return self.leaves[start];
         }
+        // Only complete subtrees are cacheable: an incomplete one (right frontier)
+        // still changes as leaves are appended.
+        let complete = start + (1usize << level) <= self.leaves.len();
+        if complete {
+            if let Some(cached) = self.node_cache.read().unwrap().get(&(level, idx)) {
+                return *cached;
+            }
+        }
         let left = self.subtree_hash(level - 1, idx * 2);
         let right = self.subtree_hash(level - 1, idx * 2 + 1);
-        merkle_compress((level - 1) as u8, left, right)
+        let node = merkle_compress((level - 1) as u8, left, right);
+        if complete {
+            self.node_cache.write().unwrap().insert((level, idx), node);
+        }
+        node
     }
 }
 
