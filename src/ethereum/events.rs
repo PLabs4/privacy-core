@@ -86,6 +86,63 @@ pub fn shield_pool_deployed_topic0_hex() -> String {
     )
 }
 
+// ── SwapCoordinator events (plan A layout) ────────────────────────────────────
+
+/// keccak256("SwapInitiated(bytes32,address,address,address,bytes32,uint64,bytes32,uint256,uint256)")
+/// — plan A layout: `commitA` + the pre-committed joiner key `rkB` ride in the event so
+/// indexers can track swaps from logs alone (the full `callA` lives in the tx calldata).
+pub fn swap_initiated_topic0_hex() -> String {
+    format!(
+        "0x{}",
+        hex::encode(Keccak256::digest(
+            b"SwapInitiated(bytes32,address,address,address,bytes32,uint64,bytes32,uint256,uint256)"
+        ))
+    )
+}
+
+/// keccak256("SwapJoined(bytes32,address,bytes32,uint256,uint256)")
+pub fn swap_joined_topic0_hex() -> String {
+    format!(
+        "0x{}",
+        hex::encode(Keccak256::digest(b"SwapJoined(bytes32,address,bytes32,uint256,uint256)"))
+    )
+}
+
+/// keccak256("SwapSettled(bytes32,bytes32)")
+pub fn swap_settled_topic0_hex() -> String {
+    format!("0x{}", hex::encode(Keccak256::digest(b"SwapSettled(bytes32,bytes32)")))
+}
+
+/// keccak256("SwapCancelled(bytes32)")
+pub fn swap_cancelled_topic0_hex() -> String {
+    format!("0x{}", hex::encode(Keccak256::digest(b"SwapCancelled(bytes32)")))
+}
+
+/// Decoded `SwapInitiated` (plan A layout). `swap_id`/`initiator` from indexed topics;
+/// the rest from log data.
+#[derive(Debug, Clone)]
+pub struct DecodedSwapInitiated {
+    pub swap_id: [u8; 32],
+    pub initiator: [u8; 20],
+    pub pool_a: [u8; 20],
+    pub pool_b: [u8; 20],
+    pub htlc_hash: [u8; 32],
+    pub deadline: u64,
+    pub commit_a: [u8; 32],
+    pub rk_bx: [u8; 32],
+    pub rk_by: [u8; 32],
+}
+
+/// Decoded `SwapJoined`. `swap_id`/`joiner` from indexed topics; the rest from log data.
+#[derive(Debug, Clone)]
+pub struct DecodedSwapJoined {
+    pub swap_id: [u8; 32],
+    pub joiner: [u8; 20],
+    pub commit_b: [u8; 32],
+    pub rk_bx: [u8; 32],
+    pub rk_by: [u8; 32],
+}
+
 /// Decoded `Shielded` / `Unshielded` accounting event (the underlying-custody side of a
 /// WrappedPERC20 shield/unshield). The note cmx itself arrives via `NoteAdded`; this event
 /// carries the public deposit/withdraw amounts and the EVM actor.
@@ -135,6 +192,10 @@ pub enum LogDecodeError {
     BadShielded,
     #[error("invalid topics/data for ShieldPoolCreated")]
     BadShieldPoolCreated,
+    #[error("invalid topics/data for SwapInitiated")]
+    BadSwapInitiated,
+    #[error("invalid topics/data for SwapJoined")]
+    BadSwapJoined,
     #[error("ethabi decode: {0}")]
     EthAbi(String),
 }
@@ -336,6 +397,117 @@ pub fn decode_unshielded_log(topics: &[String], data_hex: &str) -> Result<Decode
     decode_shielded_like(topics, data_hex)
 }
 
+/// Decode a `SwapInitiated(bytes32 indexed swapId, address indexed initiator, address poolA,
+/// address poolB, bytes32 htlcHash, uint64 deadline, bytes32 commitA, uint256 rkBx,
+/// uint256 rkBy)` log (plan A layout).
+pub fn decode_swap_initiated_log(
+    topics: &[String],
+    data_hex: &str,
+) -> Result<DecodedSwapInitiated, LogDecodeError> {
+    let swap_id = topics
+        .get(1)
+        .and_then(|t| topic_to_bytes32(t))
+        .ok_or(LogDecodeError::BadSwapInitiated)?;
+    let initiator = topics
+        .get(2)
+        .and_then(|t| topic_to_address(t))
+        .ok_or(LogDecodeError::BadSwapInitiated)?;
+    let raw = hex::decode(data_hex.strip_prefix("0x").unwrap_or(data_hex))
+        .map_err(|_| LogDecodeError::BadSwapInitiated)?;
+    let tokens = decode(
+        &[
+            ParamType::Address,
+            ParamType::Address,
+            ParamType::FixedBytes(32),
+            ParamType::Uint(64),
+            ParamType::FixedBytes(32),
+            ParamType::Uint(256),
+            ParamType::Uint(256),
+        ],
+        &raw,
+    )
+    .map_err(|e| LogDecodeError::EthAbi(e.to_string()))?;
+    if tokens.len() != 7 {
+        return Err(LogDecodeError::BadSwapInitiated);
+    }
+    let addr = |t: &Token| -> Result<[u8; 20], LogDecodeError> {
+        match t {
+            Token::Address(a) => Ok(a.0),
+            _ => Err(LogDecodeError::BadSwapInitiated),
+        }
+    };
+    let b32 = |t: &Token| -> Result<[u8; 32], LogDecodeError> {
+        match t {
+            Token::FixedBytes(b) if b.len() == 32 => Ok(b[..].try_into().unwrap()),
+            Token::Uint(u) => {
+                let mut out = [0u8; 32];
+                u.to_big_endian(&mut out);
+                Ok(out)
+            }
+            _ => Err(LogDecodeError::BadSwapInitiated),
+        }
+    };
+    let deadline = match &tokens[3] {
+        Token::Uint(u) => u64::try_from(*u).map_err(|_| LogDecodeError::BadSwapInitiated)?,
+        _ => return Err(LogDecodeError::BadSwapInitiated),
+    };
+    Ok(DecodedSwapInitiated {
+        swap_id,
+        initiator,
+        pool_a: addr(&tokens[0])?,
+        pool_b: addr(&tokens[1])?,
+        htlc_hash: b32(&tokens[2])?,
+        deadline,
+        commit_a: b32(&tokens[4])?,
+        rk_bx: b32(&tokens[5])?,
+        rk_by: b32(&tokens[6])?,
+    })
+}
+
+/// Decode a `SwapJoined(bytes32 indexed swapId, address indexed joiner, bytes32 commitB,
+/// uint256 rkBx, uint256 rkBy)` log.
+pub fn decode_swap_joined_log(
+    topics: &[String],
+    data_hex: &str,
+) -> Result<DecodedSwapJoined, LogDecodeError> {
+    let swap_id = topics
+        .get(1)
+        .and_then(|t| topic_to_bytes32(t))
+        .ok_or(LogDecodeError::BadSwapJoined)?;
+    let joiner = topics
+        .get(2)
+        .and_then(|t| topic_to_address(t))
+        .ok_or(LogDecodeError::BadSwapJoined)?;
+    let raw = hex::decode(data_hex.strip_prefix("0x").unwrap_or(data_hex))
+        .map_err(|_| LogDecodeError::BadSwapJoined)?;
+    let tokens = decode(
+        &[ParamType::FixedBytes(32), ParamType::Uint(256), ParamType::Uint(256)],
+        &raw,
+    )
+    .map_err(|e| LogDecodeError::EthAbi(e.to_string()))?;
+    if tokens.len() != 3 {
+        return Err(LogDecodeError::BadSwapJoined);
+    }
+    let b32 = |t: &Token| -> Result<[u8; 32], LogDecodeError> {
+        match t {
+            Token::FixedBytes(b) if b.len() == 32 => Ok(b[..].try_into().unwrap()),
+            Token::Uint(u) => {
+                let mut out = [0u8; 32];
+                u.to_big_endian(&mut out);
+                Ok(out)
+            }
+            _ => Err(LogDecodeError::BadSwapJoined),
+        }
+    };
+    Ok(DecodedSwapJoined {
+        swap_id,
+        joiner,
+        commit_b: b32(&tokens[0])?,
+        rk_bx: b32(&tokens[1])?,
+        rk_by: b32(&tokens[2])?,
+    })
+}
+
 /// Decode a `ShieldPoolCreated(address indexed pool, address indexed underlying, uint256 scale,
 /// string name, string symbol, uint8 decimals)` log.
 pub fn decode_shield_pool_created_log(
@@ -510,6 +682,79 @@ mod tests {
         assert_eq!(d.name, "Shield USDC");
         assert_eq!(d.symbol, "sUSDC");
         assert_eq!(d.decimals, 6);
+    }
+
+    #[test]
+    fn swap_initiated_roundtrip() {
+        let swap_id = [0x77u8; 32];
+        let initiator = [0xAAu8; 20];
+        let mut init_t = [0u8; 32];
+        init_t[12..].copy_from_slice(&initiator);
+        let data = encode(&[
+            Token::Address([0x11u8; 20].into()),
+            Token::Address([0x22u8; 20].into()),
+            Token::FixedBytes([0x33u8; 32].to_vec()),
+            Token::Uint(1_800_000_000u64.into()),
+            Token::FixedBytes([0x44u8; 32].to_vec()),
+            Token::Uint(ethabi::Uint::from_big_endian(&[0x55u8; 32])),
+            Token::Uint(ethabi::Uint::from_big_endian(&[0x66u8; 32])),
+        ]);
+        let topics = vec![
+            swap_initiated_topic0_hex(),
+            format!("0x{}", hex::encode(swap_id)),
+            format!("0x{}", hex::encode(init_t)),
+        ];
+        let d = decode_swap_initiated_log(&topics, &format!("0x{}", hex::encode(&data))).unwrap();
+        assert_eq!(d.swap_id, swap_id);
+        assert_eq!(d.initiator, initiator);
+        assert_eq!(d.pool_a, [0x11u8; 20]);
+        assert_eq!(d.pool_b, [0x22u8; 20]);
+        assert_eq!(d.htlc_hash, [0x33u8; 32]);
+        assert_eq!(d.deadline, 1_800_000_000);
+        assert_eq!(d.commit_a, [0x44u8; 32]);
+        assert_eq!(d.rk_bx, [0x55u8; 32]);
+        assert_eq!(d.rk_by, [0x66u8; 32]);
+    }
+
+    #[test]
+    fn swap_joined_roundtrip() {
+        let swap_id = [0x78u8; 32];
+        let joiner = [0xBBu8; 20];
+        let mut join_t = [0u8; 32];
+        join_t[12..].copy_from_slice(&joiner);
+        let data = encode(&[
+            Token::FixedBytes([0x99u8; 32].to_vec()),
+            Token::Uint(ethabi::Uint::from_big_endian(&[0x55u8; 32])),
+            Token::Uint(ethabi::Uint::from_big_endian(&[0x66u8; 32])),
+        ]);
+        let topics = vec![
+            swap_joined_topic0_hex(),
+            format!("0x{}", hex::encode(swap_id)),
+            format!("0x{}", hex::encode(join_t)),
+        ];
+        let d = decode_swap_joined_log(&topics, &format!("0x{}", hex::encode(&data))).unwrap();
+        assert_eq!(d.swap_id, swap_id);
+        assert_eq!(d.joiner, joiner);
+        assert_eq!(d.commit_b, [0x99u8; 32]);
+        assert_eq!(d.rk_bx, [0x55u8; 32]);
+        assert_eq!(d.rk_by, [0x66u8; 32]);
+    }
+
+    #[test]
+    fn swap_topic0s_match_onchain_abi() {
+        // Cross-checked with `cast sig-event` against SwapCoordinator.sol (plan A).
+        assert_eq!(
+            swap_initiated_topic0_hex(),
+            "0xad6f71d86a1bf4c97615e06bd201161957d47773e757c01b7608b357c44e575b"
+        );
+        assert_eq!(
+            swap_joined_topic0_hex(),
+            "0x71c103931ad034926e87adf6b77e4eda8fcf75ef2d0e8a4d9d9eb06063271702"
+        );
+        assert_eq!(
+            swap_settled_topic0_hex(),
+            "0xa203be7e143de4f19560b7726a6b05cefe948b0423aaecdcda00828c5a3e001b"
+        );
     }
 
     #[test]

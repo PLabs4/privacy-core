@@ -22,7 +22,7 @@ pub enum BundleDecodeError {
     Encode(#[from] EthEncodeError),
 }
 
-fn bundle_action_param() -> ParamType {
+pub(crate) fn bundle_action_param() -> ParamType {
     ParamType::Tuple(vec![
         ParamType::FixedBytes(32),
         ParamType::Bytes,
@@ -46,7 +46,7 @@ fn bundle_top_params() -> Vec<ParamType> {
     ]
 }
 
-fn token_bytes32(t: &Token) -> Result<[u8; 32], BundleDecodeError> {
+pub(crate) fn token_bytes32(t: &Token) -> Result<[u8; 32], BundleDecodeError> {
     match t {
         Token::FixedBytes(b) if b.len() == 32 => {
             let mut out = [0u8; 32];
@@ -69,7 +69,7 @@ fn uint_to_be32(u: &Uint) -> [u8; 32] {
     out
 }
 
-fn parse_action(token: &Token) -> Result<BundleActionArgs, BundleDecodeError> {
+pub(crate) fn parse_action(token: &Token) -> Result<BundleActionArgs, BundleDecodeError> {
     let fields = match token {
         Token::Tuple(v) if v.len() == 9 => v,
         _ => return Err(BundleDecodeError::Layout),

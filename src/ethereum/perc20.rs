@@ -167,14 +167,17 @@ pub fn compute_swap_id(
     Keccak256::digest(&encoded).into()
 }
 
-/// `initiateSwap(address,address,bytes32,bytes32,uint256,uint256,uint64,bytes32)` — selector
-/// `0x6db7974d`. `rk_bx`/`rk_by` are the joiner's randomised spend-auth key coords (BE),
+/// `initiateSwap(address,address,(bytes,uint256[3]),bytes32,uint256,uint256,uint64,bytes32)` —
+/// plan A (call-on-chain): the FULL leg-A `PrivacyCall` rides in the tx calldata so the joiner
+/// can trial-decrypt it from chain (via the indexer) BEFORE signing the join challenge. The
+/// coordinator derives `commitA = keccak256(abi.encode(callA))` internally.
+/// `rk_bx`/`rk_by` are the joiner's randomised spend-auth key coords (BE),
 /// pre-committed by the initiator (audit A-1) so only the real counterparty can `joinSwap`.
 pub fn encode_swap_initiate_calldata(
     pool_a: &[u8; 20],
     pool_b: &[u8; 20],
+    call_a: &PrivacyCallArgs,
     htlc_hash: &[u8; 32],
-    commit_a: &[u8; 32],
     rk_bx: &[u8; 32],
     rk_by: &[u8; 32],
     deadline: u64,
@@ -183,27 +186,26 @@ pub fn encode_swap_initiate_calldata(
     let tokens = vec![
         Token::Address(ethabi::Address::from(*pool_a)),
         Token::Address(ethabi::Address::from(*pool_b)),
+        privacy_call_token(call_a),
         Token::FixedBytes(htlc_hash.to_vec()),
-        Token::FixedBytes(commit_a.to_vec()),
         Token::Uint(Uint::from_big_endian(rk_bx)),
         Token::Uint(Uint::from_big_endian(rk_by)),
         Token::Uint(Uint::from(deadline)),
         Token::FixedBytes(salt.to_vec()),
     ];
     let body = encode(&tokens);
-    with_selector(
-        selector(b"initiateSwap(address,address,bytes32,bytes32,uint256,uint256,uint64,bytes32)"),
-        body,
-    )
+    with_selector(swap_initiate_selector(), body)
 }
 
-/// `joinSwap(bytes32,bytes32,uint256[3])` — selector `0x8bbe821a`.
+/// `joinSwap(bytes32,(bytes,uint256[3]),uint256[3])` — plan A (call-on-chain): the FULL leg-B
+/// `PrivacyCall` rides in the tx calldata; the coordinator derives
+/// `commitB = keccak256(abi.encode(callB))` internally.
 /// `rkB` is NOT supplied here — it was committed by the initiator at `initiateSwap` and is read
 /// from storage. `joiner_sig` is the Baby JubJub Schnorr signature under `rkB` over the join
 /// challenge, proving control of the pre-committed key.
 pub fn encode_swap_join_calldata(
     swap_id: &[u8; 32],
-    commit_b: &[u8; 32],
+    call_b: &PrivacyCallArgs,
     joiner_sig: &[[u8; 32]; 3],
 ) -> Vec<u8> {
     let joiner_sig_token = Token::FixedArray(
@@ -214,14 +216,11 @@ pub fn encode_swap_join_calldata(
     );
     let tokens = vec![
         Token::FixedBytes(swap_id.to_vec()),
-        Token::FixedBytes(commit_b.to_vec()),
+        privacy_call_token(call_b),
         joiner_sig_token,
     ];
     let body = encode(&tokens);
-    with_selector(
-        selector(b"joinSwap(bytes32,bytes32,uint256[3])"),
-        body,
-    )
+    with_selector(swap_join_selector(), body)
 }
 
 /// `settle(bytes32,bytes32,(bytes,uint256[3]),(bytes,uint256[3]))` — selector `0xc7ece15f`.
@@ -251,9 +250,176 @@ pub fn perc20_transfer_selector() -> [u8; 4] { selector(b"transfer((bytes,uint25
 pub fn perc20_transfer_executor_selector() -> [u8; 4] { selector(b"transfer(address,(bytes,uint256[3]))") }
 pub fn wrapped_shield_selector() -> [u8; 4] { selector(b"shield(uint256,(bytes,uint256[3]))") }
 pub fn wrapped_unshield_selector() -> [u8; 4] { selector(b"unshield(uint256,address,(bytes,uint256[3]))") }
-pub fn swap_initiate_selector() -> [u8; 4] { selector(b"initiateSwap(address,address,bytes32,bytes32,uint256,uint256,uint64,bytes32)") }
-pub fn swap_join_selector() -> [u8; 4] { selector(b"joinSwap(bytes32,bytes32,uint256[3])") }
+pub fn swap_initiate_selector() -> [u8; 4] { selector(b"initiateSwap(address,address,(bytes,uint256[3]),bytes32,uint256,uint256,uint64,bytes32)") }
+pub fn swap_join_selector() -> [u8; 4] { selector(b"joinSwap(bytes32,(bytes,uint256[3]),uint256[3])") }
 pub fn swap_settle_selector() -> [u8; 4] { selector(b"settle(bytes32,bytes32,(bytes,uint256[3]),(bytes,uint256[3]))") }
+
+// ── SwapCoordinator calldata DECODE (indexer-side, plan A) ───────────────────
+//
+// With plan A the initiate/join tx calldata is the canonical DA source for each swap leg:
+// the indexer parses it so wallets can trial-decrypt the counterparty leg BEFORE joining.
+// These are the exact inverses of `encode_swap_initiate_calldata` / `encode_swap_join_calldata`.
+
+use super::bundle_decode::{bundle_action_param, parse_action, token_bytes32, BundleDecodeError};
+use ethabi::{decode, ParamType};
+
+/// The `PrivacyCall` tuple param: `(bytes actions, uint256[3] bindingSig)`.
+fn privacy_call_param() -> ParamType {
+    ParamType::Tuple(vec![
+        ParamType::Bytes,
+        ParamType::FixedArray(Box::new(ParamType::Uint(256)), 3),
+    ])
+}
+
+/// Parse a decoded `PrivacyCall` tuple token back into `PrivacyCallArgs`
+/// (inner `actions` bytes are decoded as `abi.encode(BundleAction[])`).
+fn parse_privacy_call(token: &Token) -> Result<PrivacyCallArgs, BundleDecodeError> {
+    let fields = match token {
+        Token::Tuple(v) if v.len() == 2 => v,
+        _ => return Err(BundleDecodeError::Layout),
+    };
+    let actions_bytes = match &fields[0] {
+        Token::Bytes(b) => b,
+        _ => return Err(BundleDecodeError::Layout),
+    };
+    let inner = decode(&[ParamType::Array(Box::new(bundle_action_param()))], actions_bytes)
+        .map_err(|e| BundleDecodeError::Abi(e.to_string()))?;
+    let actions = match inner.first() {
+        Some(Token::Array(items)) => items.iter().map(parse_action).collect::<Result<_, _>>()?,
+        _ => return Err(BundleDecodeError::Layout),
+    };
+    let binding_sig = match &fields[1] {
+        Token::FixedArray(v) if v.len() == 3 => {
+            let mut out = [[0u8; 32]; 3];
+            for (i, t) in v.iter().enumerate() {
+                out[i] = token_bytes32(t)?;
+            }
+            out
+        }
+        _ => return Err(BundleDecodeError::Layout),
+    };
+    Ok(PrivacyCallArgs { actions, binding_sig })
+}
+
+fn token_address20(t: &Token) -> Result<[u8; 20], BundleDecodeError> {
+    match t {
+        Token::Address(a) => Ok(a.0),
+        _ => Err(BundleDecodeError::Layout),
+    }
+}
+
+/// Decoded `initiateSwap` calldata (plan A layout).
+#[derive(Debug, Clone)]
+pub struct SwapInitiateCalldata {
+    pub pool_a: [u8; 20],
+    pub pool_b: [u8; 20],
+    pub call_a: PrivacyCallArgs,
+    pub htlc_hash: [u8; 32],
+    pub rk_bx: [u8; 32],
+    pub rk_by: [u8; 32],
+    pub deadline: u64,
+    pub salt: [u8; 32],
+}
+
+impl SwapInitiateCalldata {
+    /// `commitA` as the coordinator derives it on-chain.
+    pub fn commit_a(&self) -> [u8; 32] {
+        privacy_call_commit(&self.call_a)
+    }
+}
+
+/// Decoded `joinSwap` calldata (plan A layout).
+#[derive(Debug, Clone)]
+pub struct SwapJoinCalldata {
+    pub swap_id: [u8; 32],
+    pub call_b: PrivacyCallArgs,
+    pub joiner_sig: [[u8; 32]; 3],
+}
+
+impl SwapJoinCalldata {
+    /// `commitB` as the coordinator derives it on-chain.
+    pub fn commit_b(&self) -> [u8; 32] {
+        privacy_call_commit(&self.call_b)
+    }
+}
+
+/// Decode full `initiateSwap` calldata (4-byte selector + ABI body).
+pub fn decode_swap_initiate_calldata(
+    calldata: &[u8],
+) -> Result<SwapInitiateCalldata, BundleDecodeError> {
+    if calldata.len() < 4 {
+        return Err(BundleDecodeError::TooShort);
+    }
+    if calldata[..4] != swap_initiate_selector() {
+        return Err(BundleDecodeError::BadSelector);
+    }
+    let params = vec![
+        ParamType::Address,
+        ParamType::Address,
+        privacy_call_param(),
+        ParamType::FixedBytes(32),
+        ParamType::Uint(256),
+        ParamType::Uint(256),
+        ParamType::Uint(64),
+        ParamType::FixedBytes(32),
+    ];
+    let tokens =
+        decode(&params, &calldata[4..]).map_err(|e| BundleDecodeError::Abi(e.to_string()))?;
+    if tokens.len() != 8 {
+        return Err(BundleDecodeError::Layout);
+    }
+    let deadline = match &tokens[6] {
+        Token::Uint(u) => u.as_u64(),
+        _ => return Err(BundleDecodeError::Layout),
+    };
+    Ok(SwapInitiateCalldata {
+        pool_a: token_address20(&tokens[0])?,
+        pool_b: token_address20(&tokens[1])?,
+        call_a: parse_privacy_call(&tokens[2])?,
+        htlc_hash: token_bytes32(&tokens[3])?,
+        rk_bx: token_bytes32(&tokens[4])?,
+        rk_by: token_bytes32(&tokens[5])?,
+        deadline,
+        salt: token_bytes32(&tokens[7])?,
+    })
+}
+
+/// Decode full `joinSwap` calldata (4-byte selector + ABI body).
+pub fn decode_swap_join_calldata(
+    calldata: &[u8],
+) -> Result<SwapJoinCalldata, BundleDecodeError> {
+    if calldata.len() < 4 {
+        return Err(BundleDecodeError::TooShort);
+    }
+    if calldata[..4] != swap_join_selector() {
+        return Err(BundleDecodeError::BadSelector);
+    }
+    let params = vec![
+        ParamType::FixedBytes(32),
+        privacy_call_param(),
+        ParamType::FixedArray(Box::new(ParamType::Uint(256)), 3),
+    ];
+    let tokens =
+        decode(&params, &calldata[4..]).map_err(|e| BundleDecodeError::Abi(e.to_string()))?;
+    if tokens.len() != 3 {
+        return Err(BundleDecodeError::Layout);
+    }
+    let joiner_sig = match &tokens[2] {
+        Token::FixedArray(v) if v.len() == 3 => {
+            let mut out = [[0u8; 32]; 3];
+            for (i, t) in v.iter().enumerate() {
+                out[i] = token_bytes32(t)?;
+            }
+            out
+        }
+        _ => return Err(BundleDecodeError::Layout),
+    };
+    Ok(SwapJoinCalldata {
+        swap_id: token_bytes32(&tokens[0])?,
+        call_b: parse_privacy_call(&tokens[1])?,
+        joiner_sig,
+    })
+}
 
 // Keep `EthEncodeError` reachable for symmetry with the other encoders (none of these
 // fixed-shape encoders can fail today, but callers may want a uniform error type).
@@ -288,9 +454,59 @@ mod tests {
         assert_eq!(perc20_transfer_executor_selector(), [0xc7, 0xb9, 0x21, 0xd3]);
         assert_eq!(wrapped_shield_selector(), [0x04, 0x11, 0xcb, 0xab]);
         assert_eq!(wrapped_unshield_selector(), [0x53, 0x64, 0x4c, 0x61]);
-        assert_eq!(swap_initiate_selector(), [0x6d, 0xb7, 0x97, 0x4d]);
-        assert_eq!(swap_join_selector(), [0x8b, 0xbe, 0x82, 0x1a]);
+        // Plan A (call-on-chain) selectors — full PrivacyCall in initiate/join calldata.
+        // Cross-checked with `cast sig` against the new SwapCoordinator ABI.
+        assert_eq!(swap_initiate_selector(), [0xe3, 0xb9, 0x2d, 0xfd]);
+        assert_eq!(swap_join_selector(), [0x43, 0xfa, 0x07, 0x47]);
         assert_eq!(swap_settle_selector(), [0xc7, 0xec, 0xe1, 0x5f]);
+    }
+
+    #[test]
+    fn swap_initiate_calldata_roundtrip() {
+        let call = dummy_call();
+        let cd = encode_swap_initiate_calldata(
+            &[0xA1u8; 20], &[0xB2u8; 20], &call, &[0x11u8; 32], &[0x22u8; 32], &[0x33u8; 32],
+            1_719_500_000, &[0x44u8; 32],
+        );
+        assert_eq!(&cd[..4], &swap_initiate_selector());
+        let dec = decode_swap_initiate_calldata(&cd).expect("decode initiate");
+        assert_eq!(dec.pool_a, [0xA1u8; 20]);
+        assert_eq!(dec.pool_b, [0xB2u8; 20]);
+        assert_eq!(dec.htlc_hash, [0x11u8; 32]);
+        assert_eq!(dec.rk_bx, [0x22u8; 32]);
+        assert_eq!(dec.rk_by, [0x33u8; 32]);
+        assert_eq!(dec.deadline, 1_719_500_000);
+        assert_eq!(dec.salt, [0x44u8; 32]);
+        assert_eq!(dec.call_a.actions.len(), 1);
+        assert_eq!(dec.call_a.actions[0].enc_ciphertext, call.actions[0].enc_ciphertext);
+        assert_eq!(dec.call_a.binding_sig, call.binding_sig);
+        // The decoded leg re-derives the exact on-chain commitment.
+        assert_eq!(dec.commit_a(), privacy_call_commit(&call));
+    }
+
+    #[test]
+    fn swap_join_calldata_roundtrip() {
+        let call = dummy_call();
+        let sig = [[0x51u8; 32], [0x52u8; 32], [0x53u8; 32]];
+        let cd = encode_swap_join_calldata(&[0x99u8; 32], &call, &sig);
+        assert_eq!(&cd[..4], &swap_join_selector());
+        let dec = decode_swap_join_calldata(&cd).expect("decode join");
+        assert_eq!(dec.swap_id, [0x99u8; 32]);
+        assert_eq!(dec.joiner_sig, sig);
+        assert_eq!(dec.call_b.actions.len(), 1);
+        assert_eq!(dec.call_b.actions[0].pub_fields, call.actions[0].pub_fields);
+        assert_eq!(dec.commit_b(), privacy_call_commit(&call));
+    }
+
+    #[test]
+    fn swap_decode_rejects_wrong_selector() {
+        let call = dummy_call();
+        let cd = encode_swap_join_calldata(&[0x99u8; 32], &call, &[[0u8; 32]; 3]);
+        assert!(matches!(
+            decode_swap_initiate_calldata(&cd),
+            Err(BundleDecodeError::BadSelector)
+        ));
+        assert!(matches!(decode_swap_join_calldata(&cd[..3]), Err(BundleDecodeError::TooShort)));
     }
 
     #[test]
