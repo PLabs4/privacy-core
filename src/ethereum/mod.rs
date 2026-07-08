@@ -22,24 +22,28 @@ pub use bundle_decode::{
     bundle_actions_by_cmx, decode_bundle_calldata, BundleActionCiphertexts, BundleDecodeError,
 };
 pub use events::{
-    decode_note_added_log, decode_note_confirmed_log, decode_shield_completed_log,
+    decode_note_added_log, decode_note_confirmed_log, decode_root_updated_log,
+    decode_shield_completed_log,
     decode_shielded_log, decode_shield_pool_created_log, decode_swap_initiated_log,
     decode_swap_joined_log, decode_unshielded_log,
     note_added_legacy_topic0_hex, note_added_topic0_alternatives, note_added_topic0_hex,
-    note_confirmed_topic0_hex, perc20_created_topic0_hex, shield_completed_topic0_hex,
+    note_confirmed_topic0_hex, perc20_created_topic0_hex, root_updated_topic0_hex,
+    shield_completed_topic0_hex,
     shield_pool_created_topic0_hex, shield_pool_deployed_topic0_hex, shielded_topic0_hex,
     swap_cancelled_topic0_hex, swap_initiated_topic0_hex, swap_joined_topic0_hex,
-    swap_settled_topic0_hex, unshielded_topic0_hex, DecodedNoteAdded, DecodedShielded,
+    swap_settled_topic0_hex, unshielded_topic0_hex, DecodedNoteAdded, DecodedRootUpdated,
+    DecodedShielded,
     DecodedShieldPoolCreated, DecodedSwapInitiated, DecodedSwapJoined, LogDecodeError,
 };
 pub use perc20::{
     compute_swap_id, decode_swap_initiate_calldata, decode_swap_join_calldata,
     encode_perc20_transfer_calldata, encode_perc20_transfer_executor_calldata,
     encode_swap_initiate_calldata, encode_swap_join_calldata, encode_swap_settle_calldata,
+    encode_update_root_calldata,
     encode_wrapped_shield_calldata, encode_wrapped_unshield_calldata, perc20_transfer_executor_selector,
     perc20_transfer_selector, privacy_call_commit, swap_initiate_selector, swap_join_selector,
-    swap_settle_selector, wrapped_shield_selector, wrapped_unshield_selector, PrivacyCallArgs,
-    SwapInitiateCalldata, SwapJoinCalldata,
+    swap_settle_selector, update_root_selector, wrapped_shield_selector, wrapped_unshield_selector,
+    PrivacyCallArgs, SwapInitiateCalldata, SwapJoinCalldata,
 };
 
 use ethabi::{encode, Token, Uint};

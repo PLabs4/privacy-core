@@ -120,15 +120,49 @@ impl Bn254IncrementalMerkleTree {
         self.subtree_hash(MERKLE_DEPTH_EVM, 0)
     }
 
+    /// Root of the tree as it was when only the first `size` leaves were present
+    /// (leaves beyond `size` treated as empty). Used by the batch-update model, where
+    /// the on-chain `confirmedRoot` lags the locally ingested leaves: anchors/witnesses
+    /// must be computed against the CONFIRMED prefix, not the full local tree.
+    pub fn root_at_size(&self, size: usize) -> Fr {
+        assert!(size <= self.leaves.len(), "size beyond tree");
+        self.subtree_hash_at(MERKLE_DEPTH_EVM, 0, size)
+    }
+
     /// Authentication path (siblings) for the leaf at `pos`. Panics if `pos >= len()`.
     pub fn witness(&self, pos: u32) -> [Fr; MERKLE_DEPTH_EVM] {
-        assert!((pos as usize) < self.leaves.len(), "position out of tree");
+        self.witness_at_size(pos, self.leaves.len())
+    }
+
+    /// Authentication path for `pos` in the prefix tree of the first `size` leaves
+    /// (leaves beyond `size` treated as empty). Opens to [`Self::root_at_size`].
+    pub fn witness_at_size(&self, pos: u32, size: usize) -> [Fr; MERKLE_DEPTH_EVM] {
+        assert!(size <= self.leaves.len(), "size beyond tree");
+        assert!((pos as usize) < size, "position out of prefix tree");
         let mut siblings = [Fr::ZERO; MERKLE_DEPTH_EVM];
         for level in 0..MERKLE_DEPTH_EVM {
             let sibling_node_idx = ((pos >> level) ^ 1) as usize;
-            siblings[level] = self.subtree_hash(level, sibling_node_idx);
+            siblings[level] = self.subtree_hash_at(level, sibling_node_idx, size);
         }
         siblings
+    }
+
+    /// `subtree_hash` bounded to the first `size` leaves. A subtree fully inside the
+    /// prefix is identical to the full-tree subtree (append-only ⇒ those leaves never
+    /// change), so it delegates to the cached path; only frontier-crossing nodes are
+    /// recomputed (uncached — they differ per `size`).
+    fn subtree_hash_at(&self, level: usize, idx: usize, size: usize) -> Fr {
+        let start = idx << level;
+        if start >= size {
+            return self.empty[level];
+        }
+        if start + (1usize << level) <= size {
+            return self.subtree_hash(level, idx);
+        }
+        // level >= 1 here: a level-0 node is a single leaf, always fully inside or outside.
+        let left = self.subtree_hash_at(level - 1, idx * 2, size);
+        let right = self.subtree_hash_at(level - 1, idx * 2 + 1, size);
+        merkle_compress((level - 1) as u8, left, right)
     }
 
     fn subtree_hash(&self, level: usize, idx: usize) -> Fr {

@@ -40,6 +40,15 @@ pub fn note_confirmed_topic0_hex() -> String {
     )
 }
 
+/// keccak256("RootUpdated(bytes32,uint256,uint256,uint32)") — batch-update model: the
+/// confirmed root advanced by one verified `updateRoot` batch (leaves `[from, to)`).
+pub fn root_updated_topic0_hex() -> String {
+    format!(
+        "0x{}",
+        hex::encode(Keccak256::digest(b"RootUpdated(bytes32,uint256,uint256,uint32)"))
+    )
+}
+
 /// keccak256("ShieldCompleted(bytes32,uint256)")
 pub fn shield_completed_topic0_hex() -> String {
     format!(
@@ -186,6 +195,8 @@ pub enum LogDecodeError {
     BadNoteAdded,
     #[error("invalid topics/data for NoteConfirmed")]
     BadNoteConfirmed,
+    #[error("invalid topics/data for RootUpdated")]
+    BadRootUpdated,
     #[error("invalid topics/data for ShieldCompleted")]
     BadShieldCompleted,
     #[error("invalid topics/data for Shielded/Unshielded")]
@@ -345,6 +356,43 @@ fn token_bytes32_confirmed(t: &Token) -> Result<[u8; 32], LogDecodeError> {
         Token::FixedBytes(b) if b.len() == 32 => Ok(b[..].try_into().unwrap()),
         _ => Err(LogDecodeError::BadNoteConfirmed),
     }
+}
+
+/// Decoded `RootUpdated` — one verified `updateRoot` batch confirmed leaves
+/// `[from_count, to_count)` under `new_root`.
+#[derive(Debug, Clone)]
+pub struct DecodedRootUpdated {
+    pub new_root: [u8; 32],
+    pub from_count: u64,
+    pub to_count: u64,
+    pub batch_size: u32,
+}
+
+/// Decode `RootUpdated(bytes32 indexed newRoot, uint256 fromCount, uint256 toCount, uint32 batchSize)`.
+pub fn decode_root_updated_log(
+    topics: &[String],
+    data_hex: &str,
+) -> Result<DecodedRootUpdated, LogDecodeError> {
+    let new_root = topics
+        .get(1)
+        .and_then(|t| topic_to_bytes32(t))
+        .ok_or(LogDecodeError::BadRootUpdated)?;
+    let raw = hex::decode(data_hex.strip_prefix("0x").unwrap_or(data_hex))
+        .map_err(|_| LogDecodeError::BadRootUpdated)?;
+    // data: abi.encode(uint256 fromCount, uint256 toCount, uint32 batchSize)
+    let tokens = decode(
+        &[ParamType::Uint(256), ParamType::Uint(256), ParamType::Uint(32)],
+        &raw,
+    )
+    .map_err(|e| LogDecodeError::EthAbi(e.to_string()))?;
+    let as_u64 = |t: Option<&Token>| match t {
+        Some(Token::Uint(u)) => u64::try_from(*u).map_err(|_| LogDecodeError::BadRootUpdated),
+        _ => Err(LogDecodeError::BadRootUpdated),
+    };
+    let from_count = as_u64(tokens.first())?;
+    let to_count = as_u64(tokens.get(1))?;
+    let batch_size = as_u64(tokens.get(2))? as u32;
+    Ok(DecodedRootUpdated { new_root, from_count, to_count, batch_size })
 }
 
 pub fn decode_shield_completed_log(topics: &[String], data_hex: &str) -> Result<([u8; 32], u128), LogDecodeError> {

@@ -136,6 +136,32 @@ pub fn encode_wrapped_unshield_calldata(
     with_selector(selector(b"unshield(uint256,address,(bytes,uint256[3]))"), body)
 }
 
+// ── updateRoot (permissionless batch confirm crank) ──────────────────────────
+
+/// `updateRoot(bytes32,bytes32,uint256,bytes)` — fold the next `j` queued cmx into the
+/// confirmed Merkle root with a Groth16 `cmxconfirm_evm` batch proof. Permissionless:
+/// the indexer crank (or anyone) self-submits. `proof` is the standard wire format
+/// `abi.encode(pA, pB, pC)` (see `encode_groth16_proof_components`).
+pub fn encode_update_root_calldata(
+    new_root: &[u8; 32],
+    new_frontier_commit: &[u8; 32],
+    j: u64,
+    proof: &[u8],
+) -> Vec<u8> {
+    let tokens = vec![
+        Token::FixedBytes(new_root.to_vec()),
+        Token::FixedBytes(new_frontier_commit.to_vec()),
+        Token::Uint(Uint::from(j)),
+        Token::Bytes(proof.to_vec()),
+    ];
+    let body = encode(&tokens);
+    with_selector(update_root_selector(), body)
+}
+
+pub fn update_root_selector() -> [u8; 4] {
+    selector(b"updateRoot(bytes32,bytes32,uint256,bytes)")
+}
+
 // ── SwapCoordinator (3-tx atomic swap) ───────────────────────────────────────
 
 /// `keccak256(abi.encode(initiator, poolA, poolB, htlcHash, commitA, rkBx, rkBy, salt))` — the
