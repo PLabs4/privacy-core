@@ -32,7 +32,6 @@ pub(crate) fn bundle_action_param() -> ParamType {
         ParamType::FixedBytes(32),
         ParamType::Bytes,
         ParamType::FixedArray(Box::new(ParamType::Uint(256)), 8),
-        ParamType::FixedArray(Box::new(ParamType::Uint(256)), 3),
     ])
 }
 
@@ -71,7 +70,7 @@ fn uint_to_be32(u: &Uint) -> [u8; 32] {
 
 pub(crate) fn parse_action(token: &Token) -> Result<BundleActionArgs, BundleDecodeError> {
     let fields = match token {
-        Token::Tuple(v) if v.len() == 9 => v,
+        Token::Tuple(v) if v.len() == 8 => v,
         _ => return Err(BundleDecodeError::Layout),
     };
     let cmx = token_bytes32(&fields[0])?;
@@ -100,16 +99,6 @@ pub(crate) fn parse_action(token: &Token) -> Result<BundleActionArgs, BundleDeco
         }
         _ => return Err(BundleDecodeError::Layout),
     };
-    let spend_auth_sig = match &fields[8] {
-        Token::FixedArray(v) if v.len() == 3 => {
-            let mut out = [[0u8; 32]; 3];
-            for (i, t) in v.iter().enumerate() {
-                out[i] = token_bytes32(t)?;
-            }
-            out
-        }
-        _ => return Err(BundleDecodeError::Layout),
-    };
     Ok(BundleActionArgs {
         cmx,
         enc_ciphertext,
@@ -119,7 +108,6 @@ pub(crate) fn parse_action(token: &Token) -> Result<BundleActionArgs, BundleDeco
         anchor,
         proof,
         pub_fields,
-        spend_auth_sig,
     })
 }
 
@@ -220,7 +208,6 @@ mod tests {
                     [1u8; 32],
                     [0u8; 32],
                 ],
-                spend_auth_sig: [[6u8; 32]; 3],
             }],
             value_balance: [0u8; 32],
             amount: 0,

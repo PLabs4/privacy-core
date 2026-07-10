@@ -72,7 +72,6 @@ pub struct BundleActionArgs {
     pub proof: Vec<u8>,
     /// 8 BN254 calldata fields: [anchor, cv_x, cv_y, nf, rk_x, rk_y, cmx, rt_frozen].
     pub pub_fields: [[u8; 32]; 8],
-    pub spend_auth_sig: [[u8; 32]; 3],
 }
 
 /// Arguments for
@@ -91,10 +90,10 @@ pub struct BundleCalldataArgs {
 }
 
 /// First 4 bytes of
-/// `keccak256("bundle((bytes32,bytes,bytes,bytes32,bytes32,bytes32,bytes,uint256[8],uint256[3])[],…")`.
+/// `keccak256("bundle((bytes32,bytes,bytes,bytes32,bytes32,bytes32,bytes,uint256[8])[],…")`.
 pub fn bundle_function_selector() -> [u8; 4] {
     Keccak256::digest(
-        b"bundle((bytes32,bytes,bytes,bytes32,bytes32,bytes32,bytes,uint256[8],uint256[3])[],uint256,uint256,bytes32,uint256[3])",
+        b"bundle((bytes32,bytes,bytes,bytes32,bytes32,bytes32,bytes,uint256[8])[],uint256,uint256,bytes32,uint256[3])",
     )[..4]
     .try_into()
     .expect("selector is 4 bytes")
@@ -112,12 +111,6 @@ pub fn encode_bundle_calldata(args: &BundleCalldataArgs) -> Result<Vec<u8>, EthE
                         .map(|b| Token::Uint(ethabi::Uint::from_big_endian(b)))
                         .collect(),
                 );
-                let spend_auth_sig_token = Token::FixedArray(
-                    a.spend_auth_sig
-                        .iter()
-                        .map(|b| Token::Uint(ethabi::Uint::from_big_endian(b)))
-                        .collect(),
-                );
                 Token::Tuple(vec![
                     Token::FixedBytes(a.cmx.to_vec()),
                     Token::Bytes(a.enc_ciphertext.clone()),
@@ -127,7 +120,6 @@ pub fn encode_bundle_calldata(args: &BundleCalldataArgs) -> Result<Vec<u8>, EthE
                     Token::FixedBytes(a.anchor.to_vec()),
                     Token::Bytes(a.proof.clone()),
                     pub_fields_token,
-                    spend_auth_sig_token,
                 ])
             })
             .collect(),
@@ -457,7 +449,7 @@ pub fn encode_finalize_withdraw_calldata(args: &FinalizeWithdrawCalldataArgs) ->
 //
 // Signature:
 //   shield(
-//     (bytes32,bytes,bytes,bytes32,bytes32,bytes32,bytes,uint256[8],uint256[3])[] actions,
+//     (bytes32,bytes,bytes,bytes32,bytes32,bytes32,bytes,uint256[8])[] actions,
 //     uint256 amount,
 //     address owner,
 //     uint256 deadline,
@@ -493,7 +485,7 @@ pub struct ErcShieldCalldataArgs {
 /// First 4 bytes of the `PrivacyERC.shield()` function selector.
 pub fn erc_shield_function_selector() -> [u8; 4] {
     Keccak256::digest(
-        b"shield((bytes32,bytes,bytes,bytes32,bytes32,bytes32,bytes,uint256[8],uint256[3])[],uint256,address,uint256,uint8,bytes32,bytes32,uint256[3])",
+        b"shield((bytes32,bytes,bytes,bytes32,bytes32,bytes32,bytes,uint256[8])[],uint256,address,uint256,uint8,bytes32,bytes32,uint256[3])",
     )[..4]
     .try_into()
     .expect("selector is 4 bytes")
@@ -514,12 +506,6 @@ pub fn encode_erc_shield_calldata(args: &ErcShieldCalldataArgs) -> Result<Vec<u8
                         .map(|x| Token::Uint(Uint::from_big_endian(x)))
                         .collect(),
                 );
-                let spend_auth_token = Token::FixedArray(
-                    a.spend_auth_sig
-                        .iter()
-                        .map(|x| Token::Uint(Uint::from_big_endian(x)))
-                        .collect(),
-                );
                 Ok(Token::Tuple(vec![
                     Token::FixedBytes(a.cmx.to_vec()),
                     Token::Bytes(a.enc_ciphertext.clone()),
@@ -529,7 +515,6 @@ pub fn encode_erc_shield_calldata(args: &ErcShieldCalldataArgs) -> Result<Vec<u8
                     Token::FixedBytes(a.anchor.to_vec()),
                     Token::Bytes(a.proof.clone()),
                     pub_fields_token,
-                    spend_auth_token,
                 ]))
             })
             .collect::<Result<Vec<_>, _>>()?,
@@ -706,7 +691,6 @@ mod tests {
                 anchor:         [4u8; 32],
                 proof:          proof_bytes,
                 pub_fields:     [[5u8; 32]; 8],
-                spend_auth_sig: [[6u8; 32]; 3],
             }],
             value_balance:  [0u8; 32],
             amount:         0,
@@ -727,14 +711,13 @@ mod tests {
         //
         // Within struct elem0 (offsets relative to W9):
         //   +0   = cmx
-        //   +32  = enc_offset    ← should be 576 = 0x240
-        //   +64  = out_offset    ← should be 1216 = 0x4c0
+        //   +32  = enc_offset    ← should be 480 = 0x1e0
+        //   +64  = out_offset    ← should be 1120 = 0x460
         //   +96  = epk
         //   +128 = nfOld
         //   +160 = anchor
-        //   +192 = proof_offset  ← should be 1344 = 0x540
+        //   +192 = proof_offset  ← should be 1248 = 0x4e0
         //   +224..+479 = pubFields[8]
-        //   +480..+575 = spendAuthSig[3]
 
         let body = &cd[4..]; // skip selector
 
@@ -750,8 +733,8 @@ mod tests {
         let out_offset   = read_u256(struct_start + 64);   // +64
         let proof_offset = read_u256(struct_start + 192);  // +192
 
-        assert_eq!(enc_offset,   576,  "enc_offset should be 0x240 = 576");
-        assert_eq!(out_offset,   1216, "out_offset should be 0x4c0 = 1216");
-        assert_eq!(proof_offset, 1344, "proof_offset should be 0x540 = 1344, got {proof_offset:#x}");
+        assert_eq!(enc_offset,   480,  "enc_offset should be 0x1e0 = 480");
+        assert_eq!(out_offset,   1120, "out_offset should be 0x460 = 1120");
+        assert_eq!(proof_offset, 1248, "proof_offset should be 0x4e0 = 1248, got {proof_offset:#x}");
     }
 }

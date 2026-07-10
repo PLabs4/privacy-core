@@ -25,7 +25,9 @@ fn selector(signature: &[u8]) -> [u8; 4] {
         .expect("selector is 4 bytes")
 }
 
-/// `IEndpointCore.BundleAction[]` as an ethabi token (shared with `bundle()` layout).
+/// `IEndpointCore.BundleAction[]` as an ethabi token.
+/// The current PERC20 ABI has eight action fields; the removed `spendAuthSig`
+/// is not part of the nested `PrivacyCall.actions` bytes.
 fn bundle_actions_token(actions: &[BundleActionArgs]) -> Token {
     Token::Array(
         actions
@@ -33,12 +35,6 @@ fn bundle_actions_token(actions: &[BundleActionArgs]) -> Token {
             .map(|a| {
                 let pub_fields_token = Token::FixedArray(
                     a.pub_fields
-                        .iter()
-                        .map(|b| Token::Uint(Uint::from_big_endian(b)))
-                        .collect(),
-                );
-                let spend_auth_sig_token = Token::FixedArray(
-                    a.spend_auth_sig
                         .iter()
                         .map(|b| Token::Uint(Uint::from_big_endian(b)))
                         .collect(),
@@ -52,7 +48,6 @@ fn bundle_actions_token(actions: &[BundleActionArgs]) -> Token {
                     Token::FixedBytes(a.anchor.to_vec()),
                     Token::Bytes(a.proof.clone()),
                     pub_fields_token,
-                    spend_auth_sig_token,
                 ])
             })
             .collect(),
@@ -466,7 +461,6 @@ mod tests {
             anchor: [4u8; 32],
             proof: vec![0xabu8; 256],
             pub_fields: [[5u8; 32]; 8],
-            spend_auth_sig: [[6u8; 32]; 3],
         }
     }
 
