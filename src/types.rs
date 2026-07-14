@@ -17,6 +17,10 @@ pub struct OrchardStoredAction {
     pub ephemeral_key: [u8; 32],
     pub enc_ciphertext: Vec<u8>,
     pub out_ciphertext: Vec<u8>,
+    /// Legacy Orchard SpendAuth bytes. The current Groth16 protocol proves
+    /// SpendAuth in-circuit and therefore omits this field on the wire. Keep it
+    /// only for decoding historical stored bundles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spend_auth_sig: Vec<u8>,
     /// keccak256(sharedSecret) for Phase 2 hash-lock confirmation.
     /// Present only on `transfer()` actions; absent for `shield()`.
@@ -107,4 +111,45 @@ pub struct OrchardIndexBatch {
     /// Latest confirmed commitment tree root after processing this batch.
     #[serde(default)]
     pub latest_root: Option<[u8; 32]>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OrchardStoredAction;
+
+    fn current_action() -> OrchardStoredAction {
+        OrchardStoredAction {
+            cv: [1; 32],
+            nullifier: [2; 32],
+            rk: [3; 32],
+            cmx: [4; 32],
+            ephemeral_key: [5; 32],
+            enc_ciphertext: vec![6; 580],
+            out_ciphertext: vec![7; 80],
+            spend_auth_sig: Vec::new(),
+            ack_hash: None,
+            proof_bn254: Some(vec![8; 256]),
+            pub_fields_bn254: Some(vec![[9; 32]; 8]),
+        }
+    }
+
+    #[test]
+    fn current_wire_action_omits_legacy_spend_auth_signature() {
+        let value = serde_json::to_value(current_action()).unwrap();
+        assert!(value.get("spend_auth_sig").is_none());
+
+        let decoded: OrchardStoredAction = serde_json::from_value(value).unwrap();
+        assert!(decoded.spend_auth_sig.is_empty());
+    }
+
+    #[test]
+    fn historical_spend_auth_signature_still_round_trips() {
+        let mut action = current_action();
+        action.spend_auth_sig = vec![10; 96];
+        let value = serde_json::to_value(&action).unwrap();
+        assert_eq!(value["spend_auth_sig"].as_array().unwrap().len(), 96);
+
+        let decoded: OrchardStoredAction = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.spend_auth_sig, action.spend_auth_sig);
+    }
 }
