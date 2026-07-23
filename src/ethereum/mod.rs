@@ -6,7 +6,7 @@
 //!   -amount  (bit255 = 1) → shield    (value entering pool, high bit = sign)
 //!
 //! The raw satoshi count is always stored in the lower 64 bits; bit 255 is the sign.
-//! When doing BJJ cryptography (BindingSig), the contract/prover decodes the sign
+//! When constructing the Binding witness, the prover decodes the sign
 //! and computes the actual scalar: positive → scalar, negative → ℓ − scalar.
 
 pub mod groth16_proof;
@@ -56,9 +56,14 @@ use thiserror::Error;
 pub enum EthEncodeError {
     #[error("enc_ciphertext must be 580 bytes (Orchard in-band), got {0}")]
     BadEncLen(usize),
+    #[error("v3 bundle missing Binding Groth16 proof")]
+    MissingBindingProof,
 }
 
-// ── bundle(BundleAction[],uint256,uint256,bytes32,uint256[3]) ─────────────────
+pub type BindingProof = [[u8; 32]; 8];
+pub type LegacyBindingSignature = [[u8; 32]; 3];
+
+// ── bundle(BundleAction[],uint256,uint256,bytes32,uint256[8]) ─────────────────
 
 /// One action passed to `bundle()`.
 #[derive(Debug, Clone)]
@@ -75,7 +80,7 @@ pub struct BundleActionArgs {
 }
 
 /// Arguments for
-/// `bundle(BundleAction[],uint256,uint256,bytes32,uint256[3])`.
+/// `bundle(BundleAction[],uint256,uint256,bytes32,uint256[8])`.
 #[derive(Debug, Clone)]
 pub struct BundleCalldataArgs {
     pub actions: Vec<BundleActionArgs>,
@@ -85,15 +90,15 @@ pub struct BundleCalldataArgs {
     pub amount: u64,
     /// BTC recipient hash for unshield; [0u8; 32] for transfer.
     pub recipient_meta: [u8; 32],
-    /// Baby JubJub Schnorr binding signature [Rx, Ry, s]; bsk = Σ rcv_i.
-    pub binding_sig: [[u8; 32]; 3],
+    pub binding_proof: Option<BindingProof>,
+    pub legacy_binding_sig: Option<LegacyBindingSignature>,
 }
 
 /// First 4 bytes of
 /// `keccak256("bundle((bytes32,bytes,bytes,bytes32,bytes32,bytes32,bytes,uint256[8])[],…")`.
 pub fn bundle_function_selector() -> [u8; 4] {
     Keccak256::digest(
-        b"bundle((bytes32,bytes,bytes,bytes32,bytes32,bytes32,bytes,uint256[8])[],uint256,uint256,bytes32,uint256[3])",
+        b"bundle((bytes32,bytes,bytes,bytes32,bytes32,bytes32,bytes,uint256[8])[],uint256,uint256,bytes32,uint256[8])",
     )[..4]
     .try_into()
     .expect("selector is 4 bytes")
@@ -124,8 +129,12 @@ pub fn encode_bundle_calldata(args: &BundleCalldataArgs) -> Result<Vec<u8>, EthE
             })
             .collect(),
     );
-    let binding_sig_token = Token::FixedArray(
-        args.binding_sig
+    let binding_proof = args.binding_proof.as_ref().ok_or(EthEncodeError::MissingBindingProof)?;
+    if args.legacy_binding_sig.is_some() {
+        return Err(EthEncodeError::MissingBindingProof);
+    }
+    let binding_proof_token = Token::FixedArray(
+        binding_proof
             .iter()
             .map(|b| Token::Uint(ethabi::Uint::from_big_endian(b)))
             .collect(),
@@ -135,7 +144,7 @@ pub fn encode_bundle_calldata(args: &BundleCalldataArgs) -> Result<Vec<u8>, EthE
         Token::Uint(ethabi::Uint::from_big_endian(&args.value_balance)),
         Token::Uint(ethabi::Uint::from(args.amount)),
         Token::FixedBytes(args.recipient_meta.to_vec()),
-        binding_sig_token,
+        binding_proof_token,
     ];
     let body = encode(&tokens);
     let mut out = Vec::with_capacity(4 + body.len());
@@ -666,15 +675,15 @@ mod tests {
         assert_ne!(proof_off, 1312, "proof_offset should be 1312 but it is 82");
     }
     ///
-    /// BundleAction static header = 9 fields, all 32 bytes each in head:
+    /// Current BundleAction static header = 8 fields:
     ///   cmx(32) + enc_off(32) + out_off(32) + epk(32) + nfOld(32)
-    ///   + anchor(32) + proof_off(32) + pubFields[8](256) + spendAuth[3](96)
-    ///   = 576 bytes total head
+    ///   + anchor(32) + proof_off(32) + pubFields[8](256)
+    ///   = 480 bytes total head
     ///
     /// Dynamic data layout:
-    ///   enc  at offset 576        (32 len + 580 data padded to 608)  → end 576+640=1216
-    ///   out  at offset 1216       (32 len +  80 data padded to  96)  → end 1216+128=1344
-    ///   proof at offset 1344 = 0x540
+    ///   enc  at offset 480        (32 len + 580 data padded to 608)  → end 1120
+    ///   out  at offset 1120       (32 len +  80 data padded to  96)  → end 1248
+    ///   proof at offset 1248 = 0x4e0
     #[test]
     fn bundle_calldata_proof_offset_is_correct() {
         let proof_bytes = vec![0xabu8; 256]; // Groth16 abi.encode(pA,pB,pC) size
@@ -695,21 +704,22 @@ mod tests {
             value_balance:  [0u8; 32],
             amount:         0,
             recipient_meta: [0u8; 32],
-            binding_sig:    [[7u8; 32]; 3],
+            binding_proof: Some([[7u8; 32]; 8]),
+            legacy_binding_sig: None,
         })
         .expect("encode_bundle_calldata failed");
 
         // Skip selector (4 bytes).  Body layout:
-        //   W0  = offset_to_actions (= 0xe0 = 224)
+        //   W0  = offset_to_actions (= 0x180 = 384)
         //   W1  = valueBalance
         //   W2  = amount
         //   W3  = recipientMeta
-        //   W4-W6 = bindingSig[3]
-        //   W7  = actions.length (1)
-        //   W8  = offset_to_elem0 (32)
-        //   W9  = struct elem0 starts here
+        //   W4-W11 = bindingProof[8]
+        //   W12 = actions.length (1)
+        //   W13 = offset_to_elem0 (32)
+        //   W14 = struct elem0 starts here
         //
-        // Within struct elem0 (offsets relative to W9):
+        // Within struct elem0 (offsets relative to W14):
         //   +0   = cmx
         //   +32  = enc_offset    ← should be 480 = 0x1e0
         //   +64  = out_offset    ← should be 1120 = 0x460
@@ -721,8 +731,8 @@ mod tests {
 
         let body = &cd[4..]; // skip selector
 
-        // struct elem0 starts at word 9 (= byte 288)
-        let struct_start = 9 * 32_usize;
+        // struct elem0 starts at word 14 (= byte 448)
+        let struct_start = 14 * 32_usize;
 
         let read_u256 = |offset: usize| -> u128 {
             let word = &body[offset..offset + 32];

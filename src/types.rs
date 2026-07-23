@@ -49,7 +49,10 @@ pub struct OrchardStoredBundle {
     /// Legacy bundle-level pub fields (prefer per-action `pub_fields_bn254`).
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "pub_inputs_bn254")]
     pub pub_fields_bn254: Option<Vec<[u8; 32]>>,
-    /// Baby JubJub Schnorr binding signature [Rx, Ry, s] (each 32-byte big-endian BN254 Fr).
+    /// Independent Binding Groth16 proof in Solidity verifier word order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_proof_bn254: Option<[[u8; 32]; 8]>,
+    /// Historical protocol-v2 Schnorr signature, accepted for storage decoding only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding_sig_bn254: Option<[[u8; 32]; 3]>,
     /// Net value change for this bundle (v_new_total - v_old_total).

@@ -3,20 +3,20 @@
 //!
 //! These mirror the on-chain ABI exactly (see the PERC20 repo's `privacybtc-ethereum`):
 //! every entrypoint takes a `PrivacyCall` tuple
-//!   `(bytes actions, uint256[3] bindingSig)`
+//!   `(bytes actions, uint256[8] bindingProof)`
 //! where `actions == abi.encode(IEndpointCore.BundleAction[])`. The relayer forwards the
-//! already-signed bundle (v2 sighash, incl. `executor`) verbatim; it never re-signs.
+//! already-proved bundle (v3 sighash, incl. `executor`) verbatim.
 
 use super::{BundleActionArgs, EthEncodeError};
 use ethabi::{encode, Token, Uint};
 use sha3::{Digest, Keccak256};
 
-/// A `PrivacyCall` — an already-proved, already-signed bundle ready for submission.
+/// A `PrivacyCall` — an already-proved bundle ready for submission.
 #[derive(Debug, Clone)]
 pub struct PrivacyCallArgs {
     pub actions: Vec<BundleActionArgs>,
-    /// Baby JubJub Schnorr binding signature `[Rx, Ry, s]` over the v2 bundle sighash.
-    pub binding_sig: [[u8; 32]; 3],
+    /// Independent Binding Groth16 proof in Solidity verifier word order.
+    pub binding_proof: [[u8; 32]; 8],
 }
 
 fn selector(signature: &[u8]) -> [u8; 4] {
@@ -54,16 +54,16 @@ fn bundle_actions_token(actions: &[BundleActionArgs]) -> Token {
     )
 }
 
-/// The `PrivacyCall` tuple token: `(bytes abi.encode(BundleAction[]), uint256[3] bindingSig)`.
+/// The `PrivacyCall` tuple token: `(bytes abi.encode(BundleAction[]), uint256[8] bindingProof)`.
 fn privacy_call_token(call: &PrivacyCallArgs) -> Token {
     let actions_bytes = encode(&[bundle_actions_token(&call.actions)]);
-    let binding_sig_token = Token::FixedArray(
-        call.binding_sig
+    let binding_proof_token = Token::FixedArray(
+        call.binding_proof
             .iter()
             .map(|b| Token::Uint(Uint::from_big_endian(b)))
             .collect(),
     );
-    Token::Tuple(vec![Token::Bytes(actions_bytes), binding_sig_token])
+    Token::Tuple(vec![Token::Bytes(actions_bytes), binding_proof_token])
 }
 
 /// `keccak256(abi.encode(PrivacyCall))` — the commitment the `SwapCoordinator` stores for
@@ -82,14 +82,14 @@ fn with_selector(sel: [u8; 4], body: Vec<u8>) -> Vec<u8> {
 
 // ── PERC20 transfer (permissionless + executor-gated) ────────────────────────
 
-/// `transfer((bytes,uint256[3]))` — permissionless value-neutral transfer. Selector `0xeda1a0ac`.
+/// `transfer((bytes,uint256[8]))` — permissionless value-neutral transfer. Selector `0xb2d4797b`.
 pub fn encode_perc20_transfer_calldata(call: &PrivacyCallArgs) -> Vec<u8> {
     let body = encode(&[privacy_call_token(call)]);
-    with_selector(selector(b"transfer((bytes,uint256[3]))"), body)
+    with_selector(selector(b"transfer((bytes,uint256[8]))"), body)
 }
 
-/// `transfer(address,(bytes,uint256[3]))` — executor-gated transfer (atomic-swap leg).
-/// Selector `0xc7b921d3`. `executor` MUST equal the bound `executor` in the v2 sighash
+/// `transfer(address,(bytes,uint256[8]))` — executor-gated transfer (atomic-swap leg).
+/// Selector `0x5e09e2b1`. `executor` MUST equal the bound `executor` in the v3 sighash
 /// (typically the `SwapCoordinator`).
 pub fn encode_perc20_transfer_executor_calldata(
     executor: &[u8; 20],
@@ -100,22 +100,22 @@ pub fn encode_perc20_transfer_executor_calldata(
         privacy_call_token(call),
     ];
     let body = encode(&tokens);
-    with_selector(selector(b"transfer(address,(bytes,uint256[3]))"), body)
+    with_selector(selector(b"transfer(address,(bytes,uint256[8]))"), body)
 }
 
 // ── WrappedPERC20 shield / unshield ──────────────────────────────────────────
 
-/// `shield(uint256,(bytes,uint256[3]))` — deposit underlying → mint shielded note.
-/// Selector `0x0411cbab`. `amount_units` is in NOTE UNITS (the contract pulls
+/// `shield(uint256,(bytes,uint256[8]))` — deposit underlying → mint shielded note.
+/// Selector `0x33b854b0`. `amount_units` is in NOTE UNITS (the contract pulls
 /// `amount_units * scale` of the underlying from `msg.sender`).
 pub fn encode_wrapped_shield_calldata(amount_units: u64, call: &PrivacyCallArgs) -> Vec<u8> {
     let tokens = vec![Token::Uint(Uint::from(amount_units)), privacy_call_token(call)];
     let body = encode(&tokens);
-    with_selector(selector(b"shield(uint256,(bytes,uint256[3]))"), body)
+    with_selector(selector(b"shield(uint256,(bytes,uint256[8]))"), body)
 }
 
-/// `unshield(uint256,address,(bytes,uint256[3]))` — spend note → release underlying to
-/// `recipient`. Selector `0x53644c61`. The recipient is bound into the binding sighash
+/// `unshield(uint256,address,(bytes,uint256[8]))` — spend note → release underlying to
+/// `recipient`. Selector `0x1952ce65`. The recipient is bound into the Binding sighash
 /// on-chain (`recipientMeta = uint160(recipient)`), so it must match the proved bundle.
 pub fn encode_wrapped_unshield_calldata(
     amount_units: u64,
@@ -128,7 +128,7 @@ pub fn encode_wrapped_unshield_calldata(
         privacy_call_token(call),
     ];
     let body = encode(&tokens);
-    with_selector(selector(b"unshield(uint256,address,(bytes,uint256[3]))"), body)
+    with_selector(selector(b"unshield(uint256,address,(bytes,uint256[8]))"), body)
 }
 
 // ── updateRoot (permissionless batch confirm crank) ──────────────────────────
@@ -188,7 +188,7 @@ pub fn compute_swap_id(
     Keccak256::digest(&encoded).into()
 }
 
-/// `initiateSwap(address,address,(bytes,uint256[3]),bytes32,uint256,uint256,uint64,bytes32)` —
+/// `initiateSwap(address,address,(bytes,uint256[8]),bytes32,uint256,uint256,uint64,bytes32)` —
 /// plan A (call-on-chain): the FULL leg-A `PrivacyCall` rides in the tx calldata so the joiner
 /// can trial-decrypt it from chain (via the indexer) BEFORE signing the join challenge. The
 /// coordinator derives `commitA = keccak256(abi.encode(callA))` internally.
@@ -218,7 +218,7 @@ pub fn encode_swap_initiate_calldata(
     with_selector(swap_initiate_selector(), body)
 }
 
-/// `joinSwap(bytes32,(bytes,uint256[3]),uint256[3])` — plan A (call-on-chain): the FULL leg-B
+/// `joinSwap(bytes32,(bytes,uint256[8]),uint256[3])` — plan A (call-on-chain): the FULL leg-B
 /// `PrivacyCall` rides in the tx calldata; the coordinator derives
 /// `commitB = keccak256(abi.encode(callB))` internally.
 /// `rkB` is NOT supplied here — it was committed by the initiator at `initiateSwap` and is read
@@ -244,7 +244,7 @@ pub fn encode_swap_join_calldata(
     with_selector(swap_join_selector(), body)
 }
 
-/// `settle(bytes32,bytes32,(bytes,uint256[3]),(bytes,uint256[3]))` — selector `0xc7ece15f`.
+/// `settle(bytes32,bytes32,(bytes,uint256[8]),(bytes,uint256[8]))`.
 /// Reveals the HTLC preimage and submits both executor-gated legs atomically.
 pub fn encode_swap_settle_calldata(
     swap_id: &[u8; 32],
@@ -260,20 +260,20 @@ pub fn encode_swap_settle_calldata(
     ];
     let body = encode(&tokens);
     with_selector(
-        selector(b"settle(bytes32,bytes32,(bytes,uint256[3]),(bytes,uint256[3]))"),
+        selector(b"settle(bytes32,bytes32,(bytes,uint256[8]),(bytes,uint256[8]))"),
         body,
     )
 }
 
 // ── selectors (handy for tests / dispatch) ───────────────────────────────────
 
-pub fn perc20_transfer_selector() -> [u8; 4] { selector(b"transfer((bytes,uint256[3]))") }
-pub fn perc20_transfer_executor_selector() -> [u8; 4] { selector(b"transfer(address,(bytes,uint256[3]))") }
-pub fn wrapped_shield_selector() -> [u8; 4] { selector(b"shield(uint256,(bytes,uint256[3]))") }
-pub fn wrapped_unshield_selector() -> [u8; 4] { selector(b"unshield(uint256,address,(bytes,uint256[3]))") }
-pub fn swap_initiate_selector() -> [u8; 4] { selector(b"initiateSwap(address,address,(bytes,uint256[3]),bytes32,uint256,uint256,uint64,bytes32)") }
-pub fn swap_join_selector() -> [u8; 4] { selector(b"joinSwap(bytes32,(bytes,uint256[3]),uint256[3])") }
-pub fn swap_settle_selector() -> [u8; 4] { selector(b"settle(bytes32,bytes32,(bytes,uint256[3]),(bytes,uint256[3]))") }
+pub fn perc20_transfer_selector() -> [u8; 4] { selector(b"transfer((bytes,uint256[8]))") }
+pub fn perc20_transfer_executor_selector() -> [u8; 4] { selector(b"transfer(address,(bytes,uint256[8]))") }
+pub fn wrapped_shield_selector() -> [u8; 4] { selector(b"shield(uint256,(bytes,uint256[8]))") }
+pub fn wrapped_unshield_selector() -> [u8; 4] { selector(b"unshield(uint256,address,(bytes,uint256[8]))") }
+pub fn swap_initiate_selector() -> [u8; 4] { selector(b"initiateSwap(address,address,(bytes,uint256[8]),bytes32,uint256,uint256,uint64,bytes32)") }
+pub fn swap_join_selector() -> [u8; 4] { selector(b"joinSwap(bytes32,(bytes,uint256[8]),uint256[3])") }
+pub fn swap_settle_selector() -> [u8; 4] { selector(b"settle(bytes32,bytes32,(bytes,uint256[8]),(bytes,uint256[8]))") }
 
 // ── SwapCoordinator calldata DECODE (indexer-side, plan A) ───────────────────
 //
@@ -284,11 +284,11 @@ pub fn swap_settle_selector() -> [u8; 4] { selector(b"settle(bytes32,bytes32,(by
 use super::bundle_decode::{bundle_action_param, parse_action, token_bytes32, BundleDecodeError};
 use ethabi::{decode, ParamType};
 
-/// The `PrivacyCall` tuple param: `(bytes actions, uint256[3] bindingSig)`.
+/// The `PrivacyCall` tuple param: `(bytes actions, uint256[8] bindingProof)`.
 fn privacy_call_param() -> ParamType {
     ParamType::Tuple(vec![
         ParamType::Bytes,
-        ParamType::FixedArray(Box::new(ParamType::Uint(256)), 3),
+        ParamType::FixedArray(Box::new(ParamType::Uint(256)), 8),
     ])
 }
 
@@ -309,9 +309,9 @@ fn parse_privacy_call(token: &Token) -> Result<PrivacyCallArgs, BundleDecodeErro
         Some(Token::Array(items)) => items.iter().map(parse_action).collect::<Result<_, _>>()?,
         _ => return Err(BundleDecodeError::Layout),
     };
-    let binding_sig = match &fields[1] {
-        Token::FixedArray(v) if v.len() == 3 => {
-            let mut out = [[0u8; 32]; 3];
+    let binding_proof = match &fields[1] {
+        Token::FixedArray(v) if v.len() == 8 => {
+            let mut out = [[0u8; 32]; 8];
             for (i, t) in v.iter().enumerate() {
                 out[i] = token_bytes32(t)?;
             }
@@ -319,7 +319,7 @@ fn parse_privacy_call(token: &Token) -> Result<PrivacyCallArgs, BundleDecodeErro
         }
         _ => return Err(BundleDecodeError::Layout),
     };
-    Ok(PrivacyCallArgs { actions, binding_sig })
+    Ok(PrivacyCallArgs { actions, binding_proof })
 }
 
 fn token_address20(t: &Token) -> Result<[u8; 20], BundleDecodeError> {
@@ -465,20 +465,20 @@ mod tests {
     }
 
     fn dummy_call() -> PrivacyCallArgs {
-        PrivacyCallArgs { actions: vec![dummy_action()], binding_sig: [[7u8; 32]; 3] }
+        PrivacyCallArgs { actions: vec![dummy_action()], binding_proof: [[7u8; 32]; 8] }
     }
 
     #[test]
     fn selectors_match_onchain() {
-        assert_eq!(perc20_transfer_selector(), [0xed, 0xa1, 0xa0, 0xac]);
-        assert_eq!(perc20_transfer_executor_selector(), [0xc7, 0xb9, 0x21, 0xd3]);
-        assert_eq!(wrapped_shield_selector(), [0x04, 0x11, 0xcb, 0xab]);
-        assert_eq!(wrapped_unshield_selector(), [0x53, 0x64, 0x4c, 0x61]);
+        assert_eq!(perc20_transfer_selector(), [0xb2, 0xd4, 0x79, 0x7b]);
+        assert_eq!(perc20_transfer_executor_selector(), [0x5e, 0x09, 0xe2, 0xb1]);
+        assert_eq!(wrapped_shield_selector(), [0x33, 0xb8, 0x54, 0xb0]);
+        assert_eq!(wrapped_unshield_selector(), [0x19, 0x52, 0xce, 0x65]);
         // Plan A (call-on-chain) selectors — full PrivacyCall in initiate/join calldata.
         // Cross-checked with `cast sig` against the new SwapCoordinator ABI.
-        assert_eq!(swap_initiate_selector(), [0xe3, 0xb9, 0x2d, 0xfd]);
-        assert_eq!(swap_join_selector(), [0x43, 0xfa, 0x07, 0x47]);
-        assert_eq!(swap_settle_selector(), [0xc7, 0xec, 0xe1, 0x5f]);
+        assert_eq!(swap_initiate_selector(), [0xd4, 0x1e, 0x4a, 0x7a]);
+        assert_eq!(swap_join_selector(), [0x74, 0xda, 0x02, 0xc8]);
+        assert_eq!(swap_settle_selector(), [0xe3, 0xb3, 0xfa, 0xe4]);
     }
 
     #[test]
@@ -499,7 +499,7 @@ mod tests {
         assert_eq!(dec.salt, [0x44u8; 32]);
         assert_eq!(dec.call_a.actions.len(), 1);
         assert_eq!(dec.call_a.actions[0].enc_ciphertext, call.actions[0].enc_ciphertext);
-        assert_eq!(dec.call_a.binding_sig, call.binding_sig);
+        assert_eq!(dec.call_a.binding_proof, call.binding_proof);
         // The decoded leg re-derives the exact on-chain commitment.
         assert_eq!(dec.commit_a(), privacy_call_commit(&call));
     }
@@ -552,7 +552,7 @@ mod tests {
         let shield = encode_wrapped_shield_calldata(1000, &call);
         // transfer body (after selector) is the offset-encoded PrivacyCall starting at word 0;
         // shield body has the amount in word 0 then the PrivacyCall offset at word 1. The
-        // encoded PrivacyCall dynamic tail (actions bytes + bindingSig) must be byte-identical.
+        // encoded PrivacyCall dynamic tail (actions bytes + Binding proof) must be byte-identical.
         let t_tail = &transfer[4 + 32..]; // skip selector + head offset word
         let s_tail = &shield[4 + 64..]; // skip selector + amount + offset word
         assert_eq!(t_tail, s_tail, "PrivacyCall encoding must be reused verbatim");
@@ -564,9 +564,9 @@ mod tests {
         let c1 = privacy_call_commit(&call);
         let c2 = privacy_call_commit(&call);
         assert_eq!(c1, c2);
-        // A different binding sig changes the commitment.
+        // A different Binding proof changes the commitment.
         let mut other = call.clone();
-        other.binding_sig[2] = [0x9u8; 32];
+        other.binding_proof[7] = [0x9u8; 32];
         assert_ne!(privacy_call_commit(&other), c1);
     }
 
