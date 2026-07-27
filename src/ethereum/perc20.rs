@@ -157,6 +157,42 @@ pub fn update_root_selector() -> [u8; 4] {
     selector(b"updateRoot(bytes32,bytes32,uint256,bytes)")
 }
 
+/// One unchanged `cmxconfirm_evm` proof and its public post-state arguments
+/// inside `OrchardVerifier.updateRoots`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootUpdateArgs {
+    pub new_root: [u8; 32],
+    pub new_frontier_commit: [u8; 32],
+    pub j: u64,
+    pub proof: Vec<u8>,
+}
+
+/// `updateRoots((bytes32,bytes32,uint256,bytes)[])` — atomically verify and
+/// apply 1..=4 consecutive CmxConfirm proofs with one RLC pairing check.
+pub fn encode_update_roots_calldata(updates: &[RootUpdateArgs]) -> Vec<u8> {
+    assert!(
+        !updates.is_empty() && updates.len() <= 4,
+        "updateRoots requires 1..=4 proofs"
+    );
+    let update_tokens = updates
+        .iter()
+        .map(|update| {
+            Token::Tuple(vec![
+                Token::FixedBytes(update.new_root.to_vec()),
+                Token::FixedBytes(update.new_frontier_commit.to_vec()),
+                Token::Uint(Uint::from(update.j)),
+                Token::Bytes(update.proof.clone()),
+            ])
+        })
+        .collect();
+    let body = encode(&[Token::Array(update_tokens)]);
+    with_selector(update_roots_selector(), body)
+}
+
+pub fn update_roots_selector() -> [u8; 4] {
+    selector(b"updateRoots((bytes32,bytes32,uint256,bytes)[])")
+}
+
 // ── SwapCoordinator (3-tx atomic swap) ───────────────────────────────────────
 
 /// `keccak256(abi.encode(initiator, poolA, poolB, htlcHash, commitA, rkBx, rkBy, salt))` — the
@@ -479,6 +515,64 @@ mod tests {
         assert_eq!(swap_initiate_selector(), [0xd4, 0x1e, 0x4a, 0x7a]);
         assert_eq!(swap_join_selector(), [0x74, 0xda, 0x02, 0xc8]);
         assert_eq!(swap_settle_selector(), [0xe3, 0xb3, 0xfa, 0xe4]);
+        assert_eq!(update_root_selector(), [0xe3, 0x39, 0x05, 0xc2]);
+        assert_eq!(update_roots_selector(), [0xcb, 0xbd, 0xb3, 0x1a]);
+    }
+
+    #[test]
+    fn update_roots_calldata_encodes_exact_tuple_array() {
+        let updates = vec![
+            RootUpdateArgs {
+                new_root: [0x11; 32],
+                new_frontier_commit: [0x22; 32],
+                j: 8,
+                proof: vec![0x33; 256],
+            },
+            RootUpdateArgs {
+                new_root: [0x44; 32],
+                new_frontier_commit: [0x55; 32],
+                j: 3,
+                proof: vec![0x66; 256],
+            },
+        ];
+        let calldata = encode_update_roots_calldata(&updates);
+        assert_eq!(&calldata[..4], &update_roots_selector());
+
+        let decoded = decode(
+            &[ParamType::Array(Box::new(ParamType::Tuple(vec![
+                ParamType::FixedBytes(32),
+                ParamType::FixedBytes(32),
+                ParamType::Uint(256),
+                ParamType::Bytes,
+            ])))],
+            &calldata[4..],
+        )
+        .expect("decode updateRoots tuple array");
+        let Token::Array(items) = &decoded[0] else {
+            panic!("expected tuple array")
+        };
+        assert_eq!(items.len(), 2);
+        let Token::Tuple(first) = &items[0] else {
+            panic!("expected first tuple")
+        };
+        assert_eq!(first[0], Token::FixedBytes(updates[0].new_root.to_vec()));
+        assert_eq!(
+            first[1],
+            Token::FixedBytes(updates[0].new_frontier_commit.to_vec())
+        );
+        assert_eq!(first[2], Token::Uint(Uint::from(8)));
+        assert_eq!(first[3], Token::Bytes(updates[0].proof.clone()));
+        let Token::Tuple(second) = &items[1] else {
+            panic!("expected second tuple")
+        };
+        assert_eq!(second[2], Token::Uint(Uint::from(3)));
+        assert_eq!(second[3], Token::Bytes(updates[1].proof.clone()));
+    }
+
+    #[test]
+    #[should_panic(expected = "updateRoots requires 1..=4 proofs")]
+    fn update_roots_calldata_rejects_empty_plan() {
+        encode_update_roots_calldata(&[]);
     }
 
     #[test]

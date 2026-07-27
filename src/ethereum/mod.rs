@@ -39,11 +39,12 @@ pub use perc20::{
     compute_swap_id, decode_swap_initiate_calldata, decode_swap_join_calldata,
     encode_perc20_transfer_calldata, encode_perc20_transfer_executor_calldata,
     encode_swap_initiate_calldata, encode_swap_join_calldata, encode_swap_settle_calldata,
-    encode_update_root_calldata,
-    encode_wrapped_shield_calldata, encode_wrapped_unshield_calldata, perc20_transfer_executor_selector,
-    perc20_transfer_selector, privacy_call_commit, swap_initiate_selector, swap_join_selector,
-    swap_settle_selector, update_root_selector, wrapped_shield_selector, wrapped_unshield_selector,
-    PrivacyCallArgs, SwapInitiateCalldata, SwapJoinCalldata,
+    encode_update_root_calldata, encode_update_roots_calldata, encode_wrapped_shield_calldata,
+    encode_wrapped_unshield_calldata, perc20_transfer_executor_selector, perc20_transfer_selector,
+    privacy_call_commit, swap_initiate_selector, swap_join_selector, swap_settle_selector,
+    update_root_selector, update_roots_selector, wrapped_shield_selector,
+    wrapped_unshield_selector, PrivacyCallArgs, RootUpdateArgs, SwapInitiateCalldata,
+    SwapJoinCalldata,
 };
 
 use ethabi::{encode, Token, Uint};

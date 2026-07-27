@@ -29,6 +29,11 @@ pub const DOMAIN_FRONTIER: u64 = 3006;
 /// the circuit's `CmxConfirmEvm(maxBatch)` parameter.
 pub const CMX_CONFIRM_MAX_BATCH: usize = 8;
 
+/// Max unchanged `cmxconfirm_evm` proofs folded by one `updateRoots` RLC call.
+/// MUST equal `OrchardVerifier.MAX_ROOT_UPDATES` and
+/// `CmxConfirmRlcBatchVerifier.MAX_PROOFS`.
+pub const CMX_CONFIRM_MAX_PROOFS_PER_TX: usize = 4;
+
 /// Poseidon fold over the IMT frontier:
 /// `acc_0 = 0; acc_{l+1} = Poseidon(3006, acc_l, filled[l]); commit = acc_32`.
 pub fn frontier_commit(filled: &[Fr; MERKLE_DEPTH_EVM]) -> Fr {
@@ -150,6 +155,33 @@ impl FrontierTree {
             cmxs: cmxs.iter().map(|f| fr_dec(*f)).collect(),
             filled_start: filled_start.iter().map(|f| fr_dec(*f)).collect(),
         }
+    }
+
+    /// Plan one `updateRoots` transaction as 1..=`max_proofs` consecutive,
+    /// unchanged `cmxconfirm_evm` witness inputs. Each proof still handles at most
+    /// [`CMX_CONFIRM_MAX_BATCH`] leaves; the post-state of one segment is the
+    /// pre-state of the next. `self` advances to the final aggregate post-state.
+    ///
+    /// Call this on a clone until the aggregate transaction is confirmed, because
+    /// the on-chain update is atomic.
+    pub fn plan_batches(
+        &mut self,
+        cmxs_be: &[[u8; 32]],
+        max_proofs: usize,
+    ) -> Vec<CmxConfirmWitnessInput> {
+        assert!(
+            (1..=CMX_CONFIRM_MAX_PROOFS_PER_TX).contains(&max_proofs),
+            "max proofs must be 1..={CMX_CONFIRM_MAX_PROOFS_PER_TX}"
+        );
+        assert!(
+            !cmxs_be.is_empty() && cmxs_be.len() <= CMX_CONFIRM_MAX_BATCH * max_proofs,
+            "aggregate batch size must be 1..={}",
+            CMX_CONFIRM_MAX_BATCH * max_proofs
+        );
+        cmxs_be
+            .chunks(CMX_CONFIRM_MAX_BATCH)
+            .map(|segment| self.plan_batch(segment))
+            .collect()
     }
 }
 
@@ -325,5 +357,63 @@ mod tests {
         // Post-batch state advanced.
         assert_eq!(t.next_index(), 2);
         assert_eq!(hex_be(t.root()), hex::encode(input.new_root_be()));
+    }
+
+    #[test]
+    fn plan_batches_chains_four_unchanged_proofs_for_32_leaves() {
+        let leaves: Vec<[u8; 32]> = (1..=32u64)
+            .map(|i| {
+                let mut be = [0u8; 32];
+                be[24..].copy_from_slice(&i.to_be_bytes());
+                be
+            })
+            .collect();
+        let mut aggregate = FrontierTree::new();
+        let plans = aggregate.plan_batches(&leaves, CMX_CONFIRM_MAX_PROOFS_PER_TX);
+        assert_eq!(plans.len(), 4);
+        assert!(plans.iter().all(|p| p.batch_size() == 8));
+
+        for i in 1..plans.len() {
+            assert_eq!(plans[i].old_root, plans[i - 1].new_root);
+            assert_eq!(
+                plans[i].old_frontier_commit,
+                plans[i - 1].new_frontier_commit
+            );
+            assert_eq!(plans[i].start_idx.parse::<u64>().unwrap(), (i * 8) as u64);
+        }
+
+        let mut sequential = FrontierTree::new();
+        for leaf in &leaves {
+            sequential.insert_be(*leaf);
+        }
+        assert_eq!(aggregate.next_index(), 32);
+        assert_eq!(aggregate.root(), sequential.root());
+        assert_eq!(aggregate.frontier_commit(), sequential.frontier_commit());
+    }
+
+    #[test]
+    fn plan_batches_uses_short_final_segment() {
+        let leaves = [[1u8; 32]; 17];
+        let mut tree = FrontierTree::new();
+        let plans = tree.plan_batches(&leaves, 4);
+        assert_eq!(plans.len(), 3);
+        assert_eq!(plans[0].batch_size(), 8);
+        assert_eq!(plans[1].batch_size(), 8);
+        assert_eq!(plans[2].batch_size(), 1);
+        assert_eq!(plans[2].start_idx, "16");
+        assert_eq!(tree.next_index(), 17);
+    }
+
+    #[test]
+    #[should_panic(expected = "aggregate batch size")]
+    fn plan_batches_rejects_more_than_configured_capacity() {
+        let leaves = [[1u8; 32]; 17];
+        FrontierTree::new().plan_batches(&leaves, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "max proofs")]
+    fn plan_batches_rejects_more_than_four_proofs() {
+        FrontierTree::new().plan_batches(&[[1u8; 32]; 1], 5);
     }
 }
