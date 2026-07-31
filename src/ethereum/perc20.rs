@@ -7,7 +7,7 @@
 //! where `actions == abi.encode(IEndpointCore.BundleAction[])`. The relayer forwards the
 //! already-proved bundle (v3 sighash, incl. `executor`) verbatim.
 
-use super::{BundleActionArgs, EthEncodeError};
+use super::BundleActionArgs;
 use ethabi::{encode, Token, Uint};
 use sha3::{Digest, Keccak256};
 
@@ -477,11 +477,6 @@ pub fn decode_swap_join_calldata(
         joiner_sig,
     })
 }
-
-// Keep `EthEncodeError` reachable for symmetry with the other encoders (none of these
-// fixed-shape encoders can fail today, but callers may want a uniform error type).
-#[allow(dead_code)]
-fn _assert_error_in_scope(_e: EthEncodeError) {}
 
 #[cfg(test)]
 mod tests {

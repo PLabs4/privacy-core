@@ -34,12 +34,11 @@ pub struct OrchardMerklePath {
 pub struct OrchardCommitmentTree {
     inner: Bn254IncrementalMerkleTree,
     size: u64,
-    latest_checkpoint: Option<u64>,
 }
 
 impl OrchardCommitmentTree {
     pub fn new() -> Self {
-        Self { inner: Bn254IncrementalMerkleTree::new(), size: 0, latest_checkpoint: None }
+        Self { inner: Bn254IncrementalMerkleTree::new(), size: 0 }
     }
 
     /// Append a big-endian `cmx` (as from an EVM log) as the next leaf. Always `Some(pos)`.
@@ -48,12 +47,6 @@ impl OrchardCommitmentTree {
         let pos = self.size;
         self.size += 1;
         Some(pos)
-    }
-
-    /// Register a checkpoint label (Ethereum block number). The tree is append-only.
-    pub fn checkpoint(&mut self, checkpoint_id: u64) -> bool {
-        self.latest_checkpoint = Some(checkpoint_id);
-        true
     }
 
     /// Merkle root (LE 32 bytes). `None` when the tree is empty.
@@ -77,11 +70,6 @@ impl OrchardCommitmentTree {
         Some(fr_to_le_bytes(self.inner.root_at_size(size as usize)))
     }
 
-    /// Authentication path for the leaf at `position` (current tree state). `None` if OOB.
-    pub fn merkle_path(&self, position: u64, _checkpoint_id: u64) -> Option<OrchardMerklePath> {
-        self.merkle_path_at(position, self.size)
-    }
-
     /// Authentication path for `position` in the prefix tree of the first `size` leaves.
     /// Opens to [`Self::root_at`]`(size)`. `None` if `position >= size` or `size` exceeds
     /// the ingested leaves.
@@ -100,10 +88,6 @@ impl OrchardCommitmentTree {
 
     pub fn size(&self) -> u64 {
         self.size
-    }
-
-    pub fn latest_checkpoint_id(&self) -> Option<u64> {
-        self.latest_checkpoint
     }
 }
 
