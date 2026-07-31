@@ -331,20 +331,6 @@ pub fn value_balance_to_bjj_scalar_be(vb: &[u8; 32]) -> [u8; 32] {
     }
 }
 
-// ── Deprecated helpers kept for reference ─────────────────────────────────────
-
-/// Deprecated: use `bundle_value_balance_be(amount, false)` instead.
-#[deprecated(note = "use bundle_value_balance_be(amount, false)")]
-pub fn shield_bundle_value_balance_be(amount_sats: u64) -> [u8; 32] {
-    bundle_value_balance_be(amount_sats, false)
-}
-
-/// Deprecated: use `bundle_value_balance_be(amount, true)` instead.
-#[deprecated(note = "use bundle_value_balance_be(amount, true)")]
-pub fn shield_bundle_value_balance_subgroup_neg_be(amount_sats: u64) -> [u8; 32] {
-    bundle_value_balance_be(amount_sats, true)
-}
-
 /// Parse `0x`-prefixed 20-byte contract address.
 pub fn parse_pool_address_hex(addr: &str) -> Result<[u8; 20], BindingSighashError> {
     let clean = addr.strip_prefix("0x").unwrap_or(addr);

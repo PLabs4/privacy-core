@@ -7,42 +7,6 @@ use group::ff::{Field, FromUniformBytes, PrimeField};
 
 const STATE: usize = 80;
 
-#[derive(Debug, Clone, Copy)]
-pub(super) enum FieldType {
-    /// GF(2^n)
-    #[allow(dead_code)]
-    Binary,
-    /// GF(p)
-    PrimeOrder,
-}
-
-impl FieldType {
-    fn tag(&self) -> u8 {
-        match self {
-            FieldType::Binary => 0,
-            FieldType::PrimeOrder => 1,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(super) enum SboxType {
-    /// x^alpha
-    Pow,
-    /// x^(-1)
-    #[allow(dead_code)]
-    Inv,
-}
-
-impl SboxType {
-    fn tag(&self) -> u8 {
-        match self {
-            SboxType::Pow => 0,
-            SboxType::Inv => 1,
-        }
-    }
-}
-
 pub(super) struct Grain<F: Field> {
     state: BitArr!(for 80, in u8, Msb0),
     next_bit: usize,
@@ -50,7 +14,7 @@ pub(super) struct Grain<F: Field> {
 }
 
 impl<F: PrimeField> Grain<F> {
-    pub(super) fn new(sbox: SboxType, t: u16, r_f: u16, r_p: u16) -> Self {
+    pub(super) fn new(t: u16, r_f: u16, r_p: u16) -> Self {
         // Initialize the LFSR state.
         let mut state = bitarr![u8, Msb0; 1; STATE];
         let mut set_bits = |offset: usize, len, value| {
@@ -59,8 +23,9 @@ impl<F: PrimeField> Grain<F> {
                 *state.get_mut(offset + len - 1 - i).unwrap() = (value >> i) & 1 != 0;
             }
         };
-        set_bits(0, 2, FieldType::PrimeOrder.tag() as u16);
-        set_bits(2, 4, sbox.tag() as u16);
+        // This crate generates constants only for prime-order fields with the x^alpha S-box.
+        set_bits(0, 2, 1);
+        set_bits(2, 4, 0);
         set_bits(6, 12, F::NUM_BITS as u16);
         set_bits(18, 12, t);
         set_bits(30, 10, r_f);
@@ -180,4 +145,3 @@ impl<F: PrimeField> Iterator for Grain<F> {
         Some(self.get_next_bit())
     }
 }
-

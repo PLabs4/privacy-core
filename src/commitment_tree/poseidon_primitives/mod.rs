@@ -16,8 +16,6 @@ use group::ff::{Field, FromUniformBytes, PrimeField};
 pub(crate) mod grain;
 pub(crate) mod mds;
 
-use grain::SboxType;
-
 /// The type used to hold permutation state.
 pub type State<F, const T: usize> = [F; T];
 
@@ -61,7 +59,7 @@ pub fn generate_constants<
     let r_f = S::full_rounds();
     let r_p = S::partial_rounds();
 
-    let mut grain = grain::Grain::new(SboxType::Pow, T as u16, r_f as u16, r_p as u16);
+    let mut grain = grain::Grain::new(T as u16, r_f as u16, r_p as u16);
 
     let round_constants = (0..(r_f + r_p))
         .map(|_| {
@@ -79,18 +77,6 @@ pub fn generate_constants<
     let (mds, mds_inv) = mds::generate_mds::<F, T>(&mut grain, S::secure_mds());
 
     (round_constants, mds, mds_inv)
-}
-
-/// Runs the Poseidon permutation on the given state.
-///
-/// Exposed for testing purposes only.
-#[cfg(feature = "test-dependencies")]
-pub fn test_only_permute<F: Field, S: Spec<F, T, RATE>, const T: usize, const RATE: usize>(
-    state: &mut State<F, T>,
-    mds: &Mds<F, T>,
-    round_constants: &[[F; T]],
-) {
-    permute::<F, S, T, RATE>(state, mds, round_constants);
 }
 
 /// Runs the Poseidon permutation on the given state.
@@ -218,48 +204,6 @@ impl<F, const RATE: usize> Absorbing<F, RATE> {
         Err(value)
     }
 
-    /// Exposes the inner state of the sponge.
-    ///
-    /// This is a low-level API, requiring a detailed understanding of this specific
-    /// Poseidon implementation to use correctly and securely. It is exposed for use by
-    /// the circuit implementation in `halo2_gadgets`, and may be removed from the public
-    /// API if refactoring enables the circuit implementation to move into this crate.
-    pub fn expose_inner(&self) -> &SpongeRate<F, RATE> {
-        &self.0
-    }
-}
-
-impl<F: fmt::Debug, const RATE: usize> Squeezing<F, RATE> {
-    /// Initializes a full sponge in the squeezing state.
-    ///
-    /// This is a low-level API, requiring a detailed understanding of this specific
-    /// Poseidon implementation to use correctly and securely. It is exposed for use by
-    /// the circuit implementation in `halo2_gadgets`, and may be removed from the public
-    /// API if refactoring enables the circuit implementation to move into this crate.
-    pub fn init_full(vals: [F; RATE]) -> Self {
-        Self(
-            vals.into_iter()
-                .map(Some)
-                .collect::<Vec<_>>()
-                .try_into()
-                .unwrap(),
-        )
-    }
-}
-
-impl<F, const RATE: usize> Squeezing<F, RATE> {
-    /// Attempts to squeeze a value from the sponge state.
-    ///
-    /// Returns `None` if the sponge is empty.
-    pub fn squeeze(&mut self) -> Option<F> {
-        for entry in self.0.iter_mut() {
-            if let Some(inner) = entry.take() {
-                return Some(inner);
-            }
-        }
-        // Sponge is empty.
-        None
-    }
 }
 
 /// A Poseidon sponge.
@@ -455,4 +399,3 @@ impl<F: PrimeField, S: Spec<F, T, RATE>, const T: usize, const RATE: usize, cons
         self.sponge.finish_absorbing().squeeze()
     }
 }
-
