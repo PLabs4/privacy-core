@@ -46,6 +46,7 @@ fn bundle_actions_token(actions: &[BundleActionArgs]) -> Token {
                     Token::FixedBytes(a.epk.to_vec()),
                     Token::FixedBytes(a.nf_old.to_vec()),
                     Token::FixedBytes(a.anchor.to_vec()),
+                    Token::FixedBytes(a.recipient_tag.to_vec()),
                     Token::Bytes(a.proof.clone()),
                     pub_fields_token,
                 ])
@@ -78,6 +79,33 @@ fn with_selector(sel: [u8; 4], body: Vec<u8>) -> Vec<u8> {
     out.extend_from_slice(&sel);
     out.extend_from_slice(&body);
     out
+}
+
+// ── PERC20 mint / burn (issuer mint ≡ BTC shield; burn ≡ BTC unshield) ───────
+
+/// `mint(uint256,(bytes,uint256[8]))` — issuer-only note creation. Used by the BTC
+/// federation shield path (`/shield/auto`) against a v3 `PERC20` pBTC pool.
+pub fn encode_perc20_mint_calldata(amount: u64, call: &PrivacyCallArgs) -> Vec<u8> {
+    let tokens = vec![Token::Uint(Uint::from(amount)), privacy_call_token(call)];
+    let body = encode(&tokens);
+    with_selector(perc20_mint_selector(), body)
+}
+
+pub fn perc20_mint_selector() -> [u8; 4] {
+    selector(b"mint(uint256,(bytes,uint256[8]))")
+}
+
+/// `burn(uint256,(bytes,uint256[8]))` — spend notes and reduce public supply.
+/// On-chain `recipientMeta` is always `bytes32(0)` (see `PERC20.burn`); BTC payout
+/// address binding is enforced off-chain by the federation relayer.
+pub fn encode_perc20_burn_calldata(amount: u64, call: &PrivacyCallArgs) -> Vec<u8> {
+    let tokens = vec![Token::Uint(Uint::from(amount)), privacy_call_token(call)];
+    let body = encode(&tokens);
+    with_selector(perc20_burn_selector(), body)
+}
+
+pub fn perc20_burn_selector() -> [u8; 4] {
+    selector(b"burn(uint256,(bytes,uint256[8]))")
 }
 
 // ── PERC20 transfer (permissionless + executor-gated) ────────────────────────
@@ -339,7 +367,8 @@ fn parse_privacy_call(token: &Token) -> Result<PrivacyCallArgs, BundleDecodeErro
         Token::Bytes(b) => b,
         _ => return Err(BundleDecodeError::Layout),
     };
-    let inner = decode(&[ParamType::Array(Box::new(bundle_action_param()))], actions_bytes)
+    let inner = decode(&[ParamType::Array(Box::new(bundle_action_param(false, true)))], actions_bytes)
+        .or_else(|_| decode(&[ParamType::Array(Box::new(bundle_action_param(false, false)))], actions_bytes))
         .map_err(|e| BundleDecodeError::Abi(e.to_string()))?;
     let actions = match inner.first() {
         Some(Token::Array(items)) => items.iter().map(parse_action).collect::<Result<_, _>>()?,
@@ -490,6 +519,7 @@ mod tests {
             epk: [2u8; 32],
             nf_old: [3u8; 32],
             anchor: [4u8; 32],
+            recipient_tag: [0u8; 32],
             proof: vec![0xabu8; 256],
             pub_fields: [[5u8; 32]; 8],
         }
@@ -626,6 +656,8 @@ mod tests {
             &encode_perc20_transfer_executor_calldata(&[0xEFu8; 20], &call)[..4],
             &perc20_transfer_executor_selector()
         );
+        assert_eq!(&encode_perc20_mint_calldata(1000, &call)[..4], &perc20_mint_selector());
+        assert_eq!(&encode_perc20_burn_calldata(1000, &call)[..4], &perc20_burn_selector());
         assert_eq!(&encode_wrapped_shield_calldata(1000, &call)[..4], &wrapped_shield_selector());
         assert_eq!(
             &encode_wrapped_unshield_calldata(1000, &[0xDEu8; 20], &call)[..4],

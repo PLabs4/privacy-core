@@ -24,11 +24,22 @@ pub fn note_added_legacy_topic0_hex() -> String {
     )
 }
 
+/// keccak256("NoteAddedV2(bytes32,bytes32,bytes32,bytes,bytes,bytes32,bytes32)")
+pub fn note_added_tagged_topic0_hex() -> String {
+    format!(
+        "0x{}",
+        hex::encode(Keccak256::digest(
+            b"NoteAddedV2(bytes32,bytes32,bytes32,bytes,bytes,bytes32,bytes32)"
+        ))
+    )
+}
+
 /// Topic0 values to subscribe for all `NoteAdded` variants.
 pub fn note_added_topic0_alternatives() -> Vec<String> {
     vec![
         note_added_topic0_hex(),
         note_added_legacy_topic0_hex(),
+        note_added_tagged_topic0_hex(),
     ]
 }
 
@@ -187,6 +198,8 @@ pub struct DecodedNoteAdded {
     pub nf_old: [u8; 32],
     /// `pubFields[1]` = cv_net_x (BE). `None` on legacy logs.
     pub cv_net_x: Option<[u8; 32]>,
+    /// Indexed `NoteAddedV2.recipientTag`. Zero on untagged / legacy logs.
+    pub recipient_tag: [u8; 32],
 }
 
 #[derive(Debug, Error)]
@@ -259,6 +272,7 @@ fn decode_note_added_v2(data: &[u8]) -> Result<DecodedNoteAdded, LogDecodeError>
         epk,
         nf_old,
         cv_net_x: Some(cv_net_x),
+        recipient_tag: [0u8; 32],
     })
 }
 
@@ -288,13 +302,11 @@ fn decode_note_added_legacy(data: &[u8]) -> Result<DecodedNoteAdded, LogDecodeEr
         epk,
         nf_old,
         cv_net_x: None,
+        recipient_tag: [0u8; 32],
     })
 }
 
-/// Decode `NoteAdded` from `eth_getLogs` / WebSocket log entry.
-///
-/// Supports the current event (with `outCiphertext` + `cvNetX`) and the legacy
-/// 4-field layout. `topics[1]` = cmx (indexed).
+/// Decode `NoteAdded` / `NoteAddedV2` from `eth_getLogs` / WebSocket log entry.
 pub fn decode_note_added_log(topics: &[String], data_hex: &str) -> Result<DecodedNoteAdded, LogDecodeError> {
     let cmx = topics
         .get(1)
@@ -311,11 +323,50 @@ pub fn decode_note_added_log(topics: &[String], data_hex: &str) -> Result<Decode
     let topic0 = topics.first().map(|s| norm(s));
     let legacy = norm(&note_added_legacy_topic0_hex());
     let current = norm(&note_added_topic0_hex());
+    let tagged = norm(&note_added_tagged_topic0_hex());
+    if topic0.as_deref() == Some(tagged.as_str()) {
+        let tag = topics
+            .get(2)
+            .and_then(|t| topic_to_bytes32(t))
+            .ok_or(LogDecodeError::BadNoteAdded)?;
+        let nf_old = topics
+            .get(3)
+            .and_then(|t| topic_to_bytes32(t))
+            .ok_or(LogDecodeError::BadNoteAdded)?;
+        let tokens = decode(
+            &[
+                ParamType::Bytes,
+                ParamType::Bytes,
+                ParamType::FixedBytes(32),
+                ParamType::FixedBytes(32),
+            ],
+            &raw,
+        )
+        .map_err(|e| LogDecodeError::EthAbi(e.to_string()))?;
+        if tokens.len() != 4 {
+            return Err(LogDecodeError::BadNoteAdded);
+        }
+        let enc = match &tokens[0] {
+            Token::Bytes(b) => b.clone(),
+            _ => return Err(LogDecodeError::BadNoteAdded),
+        };
+        let out = match &tokens[1] {
+            Token::Bytes(b) => b.clone(),
+            _ => return Err(LogDecodeError::BadNoteAdded),
+        };
+        return Ok(DecodedNoteAdded {
+            cmx,
+            enc_ciphertext: enc,
+            out_ciphertext: out,
+            epk: token_bytes32(&tokens[2])?,
+            nf_old,
+            cv_net_x: Some(token_bytes32(&tokens[3])?),
+            recipient_tag: tag,
+        });
+    }
     let mut decoded = if topic0.as_deref() == Some(current.as_str()) {
         decode_note_added_v2(&raw)?
     } else if topic0.as_deref() == Some(legacy.as_str()) {
-        // Deployed pools may still use the legacy topic0 while emitting the extended
-        // 5-field log body (outCiphertext + cvNetX). Prefer v2 when the payload fits.
         decode_note_added_v2(&raw).or_else(|_| decode_note_added_legacy(&raw))?
     } else {
         decode_note_added_v2(&raw).or_else(|_| decode_note_added_legacy(&raw))?

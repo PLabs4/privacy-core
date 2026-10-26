@@ -26,7 +26,8 @@ pub use events::{
     decode_shield_completed_log,
     decode_shielded_log, decode_shield_pool_created_log, decode_swap_initiated_log,
     decode_swap_joined_log, decode_unshielded_log,
-    note_added_legacy_topic0_hex, note_added_topic0_alternatives, note_added_topic0_hex,
+    note_added_legacy_topic0_hex, note_added_tagged_topic0_hex, note_added_topic0_alternatives,
+    note_added_topic0_hex,
     note_confirmed_topic0_hex, perc20_created_topic0_hex, root_updated_topic0_hex,
     shield_completed_topic0_hex,
     shield_pool_created_topic0_hex, shield_pool_deployed_topic0_hex, shielded_topic0_hex,
@@ -37,12 +38,13 @@ pub use events::{
 };
 pub use perc20::{
     compute_swap_id, decode_swap_initiate_calldata, decode_swap_join_calldata,
-    encode_perc20_transfer_calldata, encode_perc20_transfer_executor_calldata,
-    encode_swap_initiate_calldata, encode_swap_join_calldata, encode_swap_settle_calldata,
-    encode_update_root_calldata, encode_update_roots_calldata, encode_wrapped_shield_calldata,
-    encode_wrapped_unshield_calldata, perc20_transfer_executor_selector, perc20_transfer_selector,
-    privacy_call_commit, swap_initiate_selector, swap_join_selector, swap_settle_selector,
-    update_root_selector, update_roots_selector, wrapped_shield_selector,
+    encode_perc20_burn_calldata, encode_perc20_mint_calldata, encode_perc20_transfer_calldata,
+    encode_perc20_transfer_executor_calldata, encode_swap_initiate_calldata,
+    encode_swap_join_calldata, encode_swap_settle_calldata, encode_update_root_calldata,
+    encode_update_roots_calldata, encode_wrapped_shield_calldata, encode_wrapped_unshield_calldata,
+    perc20_burn_selector, perc20_mint_selector, perc20_transfer_executor_selector,
+    perc20_transfer_selector, privacy_call_commit, swap_initiate_selector, swap_join_selector,
+    swap_settle_selector, update_root_selector, update_roots_selector, wrapped_shield_selector,
     wrapped_unshield_selector, PrivacyCallArgs, RootUpdateArgs, SwapInitiateCalldata,
     SwapJoinCalldata,
 };
@@ -75,6 +77,8 @@ pub struct BundleActionArgs {
     pub epk: [u8; 32],
     pub nf_old: [u8; 32],
     pub anchor: [u8; 32],
+    /// Discovery hint bound into Binding sighash v4. Zero = untagged.
+    pub recipient_tag: [u8; 32],
     pub proof: Vec<u8>,
     /// 8 BN254 calldata fields: [anchor, cv_x, cv_y, nf, rk_x, rk_y, cmx, rt_frozen].
     pub pub_fields: [[u8; 32]; 8],
@@ -99,7 +103,7 @@ pub struct BundleCalldataArgs {
 /// `keccak256("bundle((bytes32,bytes,bytes,bytes32,bytes32,bytes32,bytes,uint256[8])[],…")`.
 pub fn bundle_function_selector() -> [u8; 4] {
     Keccak256::digest(
-        b"bundle((bytes32,bytes,bytes,bytes32,bytes32,bytes32,bytes,uint256[8])[],uint256,uint256,bytes32,uint256[8])",
+        b"bundle((bytes32,bytes,bytes,bytes32,bytes32,bytes32,bytes32,bytes,uint256[8])[],uint256,uint256,bytes32,uint256[8])",
     )[..4]
     .try_into()
     .expect("selector is 4 bytes")
@@ -124,6 +128,7 @@ pub fn encode_bundle_calldata(args: &BundleCalldataArgs) -> Result<Vec<u8>, EthE
                     Token::FixedBytes(a.epk.to_vec()),
                     Token::FixedBytes(a.nf_old.to_vec()),
                     Token::FixedBytes(a.anchor.to_vec()),
+                    Token::FixedBytes(a.recipient_tag.to_vec()),
                     Token::Bytes(a.proof.clone()),
                     pub_fields_token,
                 ])
@@ -379,6 +384,70 @@ pub fn binding_sighash_privacy_pool_bundle_v1(
     h.finalize().into()
 }
 
+/// Binding Groth16 bundle hash matching `BundleSighashV4.buildSighash`.
+/// Empty `recipient_tags` pads `n` zero words so this matches Solidity.
+pub fn binding_sighash_privacy_pool_bundle_v4(
+    chain_id_be32: &[u8; 32],
+    contract_addr_20: &[u8; 20],
+    nullifiers: &[[u8; 32]],
+    commitments: &[[u8; 32]],
+    recipient_tags: &[[u8; 32]],
+    value_balance_be32: &[u8; 32],
+    recipient_meta: &[u8; 32],
+    executor_20: &[u8; 20],
+) -> [u8; 32] {
+    debug_assert!(
+        recipient_tags.is_empty() || recipient_tags.len() == nullifiers.len(),
+        "v4 recipient_tags must be empty (all-zero) or length n"
+    );
+    let mut h = Keccak256::new();
+    h.update(b"PrivacyPool.bundle.v4");
+    h.update(chain_id_be32);
+    h.update(contract_addr_20);
+    for nf in nullifiers {
+        h.update(nf);
+    }
+    for cm in commitments {
+        h.update(cm);
+    }
+    if recipient_tags.is_empty() {
+        for _ in 0..nullifiers.len() {
+            h.update(&[0u8; 32]);
+        }
+    } else {
+        for tag in recipient_tags {
+            h.update(tag);
+        }
+    }
+    h.update(value_balance_be32);
+    h.update(recipient_meta);
+    h.update(executor_20);
+    h.finalize().into()
+}
+
+/// `keccak256(abi.encodePacked("PERC.recipientTag.v1", chainId, pool, d, pk_d))`.
+pub fn recipient_tag_v1(
+    chain_id: u64,
+    pool: &[u8; 20],
+    raw_address: &[u8],
+) -> Result<[u8; 32], String> {
+    if raw_address.len() != 43 {
+        return Err(format!(
+            "privacy address must be 43 bytes, got {}",
+            raw_address.len()
+        ));
+    }
+    let mut chain = [0u8; 32];
+    chain[24..].copy_from_slice(&chain_id.to_be_bytes());
+    let mut h = Keccak256::new();
+    h.update(b"PERC.recipientTag.v1");
+    h.update(chain);
+    h.update(pool);
+    h.update(&raw_address[..11]);
+    h.update(&raw_address[11..]);
+    Ok(h.finalize().into())
+}
+
 /// Keccak256 preimage matching `SpendAuthSignature.buildSighash`:
 /// `abi.encodePacked("SpendAuth.action.v1", chainId, contractAddr,
 ///                   nfOld, cmx, epk, keccak256(encCiphertext), keccak256(outCiphertext))`.
@@ -509,6 +578,7 @@ pub fn encode_erc_shield_calldata(args: &ErcShieldCalldataArgs) -> Result<Vec<u8
                     Token::FixedBytes(a.epk.to_vec()),
                     Token::FixedBytes(a.nf_old.to_vec()),
                     Token::FixedBytes(a.anchor.to_vec()),
+                    Token::FixedBytes(a.recipient_tag.to_vec()),
                     Token::Bytes(a.proof.clone()),
                     pub_fields_token,
                 ]))
@@ -685,6 +755,7 @@ mod tests {
                 epk:            [2u8; 32],
                 nf_old:         [3u8; 32],
                 anchor:         [4u8; 32],
+                recipient_tag: [0u8; 32],
                 proof:          proof_bytes,
                 pub_fields:     [[5u8; 32]; 8],
             }],
@@ -706,15 +777,16 @@ mod tests {
         //   W13 = offset_to_elem0 (32)
         //   W14 = struct elem0 starts here
         //
-        // Within struct elem0 (offsets relative to W14):
+        // Within struct elem0 (offsets relative to W14), V4 head is 512 bytes:
         //   +0   = cmx
-        //   +32  = enc_offset    ← should be 480 = 0x1e0
-        //   +64  = out_offset    ← should be 1120 = 0x460
+        //   +32  = enc_offset    ← 512 (head)
+        //   +64  = out_offset    ← 1152
         //   +96  = epk
         //   +128 = nfOld
         //   +160 = anchor
-        //   +192 = proof_offset  ← should be 1248 = 0x4e0
-        //   +224..+479 = pubFields[8]
+        //   +192 = recipientTag
+        //   +224 = proof_offset  ← 1280
+        //   +256..+511 = pubFields[8]
 
         let body = &cd[4..]; // skip selector
 
@@ -726,12 +798,15 @@ mod tests {
             u128::from_be_bytes(word[16..32].try_into().unwrap())
         };
 
-        let enc_offset   = read_u256(struct_start + 32);   // +32
-        let out_offset   = read_u256(struct_start + 64);   // +64
-        let proof_offset = read_u256(struct_start + 192);  // +192
+        let enc_offset = read_u256(struct_start + 32);
+        let out_offset = read_u256(struct_start + 64);
+        let proof_offset = read_u256(struct_start + 224);
 
-        assert_eq!(enc_offset,   480,  "enc_offset should be 0x1e0 = 480");
-        assert_eq!(out_offset,   1120, "out_offset should be 0x460 = 1120");
-        assert_eq!(proof_offset, 1248, "proof_offset should be 0x4e0 = 1248, got {proof_offset:#x}");
+        assert_eq!(enc_offset, 512, "enc_offset should be 0x200 = 512");
+        assert_eq!(out_offset, 1152, "out_offset should be 0x480 = 1152");
+        assert_eq!(
+            proof_offset, 1280,
+            "proof_offset should be 0x500 = 1280, got {proof_offset:#x}"
+        );
     }
 }

@@ -32,6 +32,9 @@ pub struct OrchardStoredAction {
     /// Per-action calldata pub fields (8 × 32 bytes BE): anchor, cv, nf, rk, cmx, rt_frozen.
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "pub_inputs_bn254")]
     pub pub_fields_bn254: Option<Vec<[u8; 32]>>,
+    /// Discovery hint bound into Binding sighash v4. Zero = untagged.
+    #[serde(default)]
+    pub recipient_tag: [u8; 32],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +136,7 @@ mod tests {
             ack_hash: None,
             proof_bn254: Some(vec![8; 256]),
             pub_fields_bn254: Some(vec![[9; 32]; 8]),
+            recipient_tag: [0; 32],
         }
     }
 

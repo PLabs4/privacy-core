@@ -26,32 +26,29 @@ pub enum BundleDecodeError {
     Encode(#[from] EthEncodeError),
 }
 
-pub(crate) fn bundle_action_param() -> ParamType {
-    ParamType::Tuple(vec![
+pub(crate) fn bundle_action_param(legacy_spend_auth: bool, with_recipient_tag: bool) -> ParamType {
+    let mut fields = vec![
         ParamType::FixedBytes(32),
         ParamType::Bytes,
         ParamType::Bytes,
         ParamType::FixedBytes(32),
         ParamType::FixedBytes(32),
         ParamType::FixedBytes(32),
-        ParamType::Bytes,
-        ParamType::FixedArray(Box::new(ParamType::Uint(256)), 8),
-    ])
-}
-
-fn legacy_bundle_action_param() -> ParamType {
-    let ParamType::Tuple(mut fields) = bundle_action_param() else { unreachable!() };
-    fields.push(ParamType::FixedArray(Box::new(ParamType::Uint(256)), 3));
+    ];
+    if with_recipient_tag {
+        fields.push(ParamType::FixedBytes(32));
+    }
+    fields.push(ParamType::Bytes);
+    fields.push(ParamType::FixedArray(Box::new(ParamType::Uint(256)), 8));
+    if legacy_spend_auth {
+        fields.push(ParamType::FixedArray(Box::new(ParamType::Uint(256)), 3));
+    }
     ParamType::Tuple(fields)
 }
 
-fn bundle_top_params(legacy_spend_auth: bool, binding_words: usize) -> Vec<ParamType> {
+fn bundle_top_params(legacy_spend_auth: bool, binding_words: usize, with_recipient_tag: bool) -> Vec<ParamType> {
     vec![
-        ParamType::Array(Box::new(if legacy_spend_auth {
-            legacy_bundle_action_param()
-        } else {
-            bundle_action_param()
-        })),
+        ParamType::Array(Box::new(bundle_action_param(legacy_spend_auth, with_recipient_tag))),
         ParamType::Uint(256),
         ParamType::Uint(256),
         ParamType::FixedBytes(32),
@@ -82,9 +79,22 @@ fn uint_to_be32(u: &Uint) -> [u8; 32] {
     out
 }
 
+fn parse_pub_fields(token: &Token) -> Result<[[u8; 32]; 8], BundleDecodeError> {
+    match token {
+        Token::FixedArray(v) if v.len() == 8 => {
+            let mut out = [[0u8; 32]; 8];
+            for (i, t) in v.iter().enumerate() {
+                out[i] = token_bytes32(t)?;
+            }
+            Ok(out)
+        }
+        _ => Err(BundleDecodeError::Layout),
+    }
+}
+
 pub(crate) fn parse_action(token: &Token) -> Result<BundleActionArgs, BundleDecodeError> {
     let fields = match token {
-        Token::Tuple(v) if v.len() == 8 || v.len() == 9 => v,
+        Token::Tuple(v) if (8..=10).contains(&v.len()) => v,
         _ => return Err(BundleDecodeError::Layout),
     };
     let cmx = token_bytes32(&fields[0])?;
@@ -99,19 +109,20 @@ pub(crate) fn parse_action(token: &Token) -> Result<BundleActionArgs, BundleDeco
     let epk = token_bytes32(&fields[3])?;
     let nf_old = token_bytes32(&fields[4])?;
     let anchor = token_bytes32(&fields[5])?;
-    let proof = match &fields[6] {
-        Token::Bytes(b) => b.clone(),
-        _ => return Err(BundleDecodeError::Layout),
-    };
-    let pub_fields = match &fields[7] {
-        Token::FixedArray(v) if v.len() == 8 => {
-            let mut out = [[0u8; 32]; 8];
-            for (i, t) in v.iter().enumerate() {
-                out[i] = token_bytes32(t)?;
-            }
-            out
-        }
-        _ => return Err(BundleDecodeError::Layout),
+    let tagged = matches!(&fields[6], Token::FixedBytes(_) | Token::Uint(_));
+    let (recipient_tag, proof, pub_fields) = if tagged {
+        let tag = token_bytes32(&fields[6])?;
+        let proof = match &fields[7] {
+            Token::Bytes(b) => b.clone(),
+            _ => return Err(BundleDecodeError::Layout),
+        };
+        (tag, proof, parse_pub_fields(&fields[8])?)
+    } else {
+        let proof = match &fields[6] {
+            Token::Bytes(b) => b.clone(),
+            _ => return Err(BundleDecodeError::Layout),
+        };
+        ([0u8; 32], proof, parse_pub_fields(&fields[7])?)
     };
     Ok(BundleActionArgs {
         cmx,
@@ -120,6 +131,7 @@ pub(crate) fn parse_action(token: &Token) -> Result<BundleActionArgs, BundleDeco
         epk,
         nf_old,
         anchor,
+        recipient_tag,
         proof,
         pub_fields,
     })
@@ -142,11 +154,17 @@ pub fn decode_bundle_calldata(calldata: &[u8]) -> Result<BundleCalldataArgs, Bun
         .expect("selector");
     let legacy_spend_auth = calldata[..4] == legacy_spend_auth_selector;
     let legacy_v2 = calldata[..4] == v2_selector || legacy_spend_auth;
-    if calldata[..4] != bundle_function_selector() && !legacy_v2 {
+    let untagged_v3_selector: [u8; 4] = sha3::Keccak256::digest(
+        b"bundle((bytes32,bytes,bytes,bytes32,bytes32,bytes32,bytes,uint256[8])[],uint256,uint256,bytes32,uint256[8])",
+    )[..4]
+        .try_into()
+        .expect("selector");
+    let tagged = calldata[..4] == bundle_function_selector();
+    if !tagged && calldata[..4] != untagged_v3_selector && !legacy_v2 {
         return Err(BundleDecodeError::BadSelector);
     }
     let binding_words = if legacy_v2 { 3 } else { 8 };
-    let tokens = decode(&bundle_top_params(legacy_spend_auth, binding_words), &calldata[4..])
+    let tokens = decode(&bundle_top_params(legacy_spend_auth, binding_words, tagged), &calldata[4..])
         .map_err(|e| BundleDecodeError::Abi(e.to_string()))?;
     if tokens.len() != 5 {
         return Err(BundleDecodeError::Layout);
@@ -232,6 +250,7 @@ mod tests {
                 epk: [2u8; 32],
                 nf_old: [3u8; 32],
                 anchor: [4u8; 32],
+                recipient_tag: [0u8; 32],
                 proof: proof_bytes,
                 pub_fields: [
                     [4u8; 32],
