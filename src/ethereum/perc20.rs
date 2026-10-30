@@ -5,7 +5,7 @@
 //! every entrypoint takes a `PrivacyCall` tuple
 //!   `(bytes actions, uint256[8] bindingProof)`
 //! where `actions == abi.encode(IEndpointCore.BundleAction[])`. The relayer forwards the
-//! already-proved bundle (v3 sighash, incl. `executor`) verbatim.
+//! already-proved bundle (v4 sighash, incl. `recipientTag` and `executor`) verbatim.
 
 use super::BundleActionArgs;
 use ethabi::{encode, Token, Uint};
@@ -519,7 +519,7 @@ mod tests {
             epk: [2u8; 32],
             nf_old: [3u8; 32],
             anchor: [4u8; 32],
-            recipient_tag: [0u8; 32],
+            recipient_tag: [6u8; 32],
             proof: vec![0xabu8; 256],
             pub_fields: [[5u8; 32]; 8],
         }
@@ -618,6 +618,7 @@ mod tests {
         assert_eq!(dec.salt, [0x44u8; 32]);
         assert_eq!(dec.call_a.actions.len(), 1);
         assert_eq!(dec.call_a.actions[0].enc_ciphertext, call.actions[0].enc_ciphertext);
+        assert_eq!(dec.call_a.actions[0].recipient_tag, call.actions[0].recipient_tag);
         assert_eq!(dec.call_a.binding_proof, call.binding_proof);
         // The decoded leg re-derives the exact on-chain commitment.
         assert_eq!(dec.commit_a(), privacy_call_commit(&call));
@@ -634,6 +635,7 @@ mod tests {
         assert_eq!(dec.joiner_sig, sig);
         assert_eq!(dec.call_b.actions.len(), 1);
         assert_eq!(dec.call_b.actions[0].pub_fields, call.actions[0].pub_fields);
+        assert_eq!(dec.call_b.actions[0].recipient_tag, call.actions[0].recipient_tag);
         assert_eq!(dec.commit_b(), privacy_call_commit(&call));
     }
 
